@@ -1,92 +1,91 @@
-# PROGRESS: Safe Identity Lifecycle
+# Safe Identity Lifecycle
 
-## 2026-11-04: Phase 0 setup
+Salesforce as the system of record for identity: student records drive Google account creation, OU placement, group membership, suspension, and reactivation through the Google Admin SDK Directory API.
 
-- Registered shuraku.org on Cloudflare (personal account), auto-renew on.
-- Email Routing enabled (MX, SPF, DKIM). Routes: admin@ and luke@ to personal Gmail. Catch-all off.
-- Test forward from ucr.edu to admin@ landed in inbox. Envelope rewritten by shuraku.org (SRS); original ucr.edu DKIM survived.
-- Cloudflare Email Sending requires Workers Paid. Out of scope; welcome email will come from Salesforce.
-- Cloud Identity Free signup via sku=identitybasic. The Google Cloud "free trial" page asks for a card and is the wrong path.
-- Domain verified via Domain Connect. Google's callback returned 401 (multi-account session), but the TXT record landed; finished with the manual TXT option.
-- Admin console Subscriptions: Cloud Identity Free, Active, 50 licenses, no charges.
-- luke@ super admin: 2SV with authenticator, backup codes saved, recovery email verified.
-- Auth model decided: service account with custom admin role, key pair generated in Salesforce. New GCP orgs enforce key creation/upload baseline policies; plan a project-scoped upload exception.
-- Brief and README written.
+> **Status: Phase 0 complete.** The tenant, least-privilege service account, and Salesforce authentication are in place, and live API calls have proven create, lookup by Salesforce ID, suspend, and group membership. The integration code starts in Phase 1. Progress is logged in [`docs/PROGRESS-identity.md`](docs/PROGRESS-identity.md), and the plan is in [`docs/BRIEF-identity.md`](docs/BRIEF-identity.md).
 
-## 2026-11-04: Phase 0 proof of API access
+## Why this exists
 
-### Google Cloud project and service account
+This is a clean rebuild of a production integration I built in higher education, where Salesforce provisions Microsoft 365 accounts through Microsoft Graph. Many schools run Google instead of Microsoft, so this version targets Google Cloud Identity. More importantly, it redesigns the parts of the original that caused problems in production:
 
-- Created project `identity-lifecycle` under the shuraku.org organization. No billing account attached; no billing prompt at any step.
-- Enabled the Admin SDK API on the project. No billing prompt.
-- Created service account `salesforce-directory-sync`. No GCP IAM roles granted; its access comes from the Admin console role only. No key created.
+| Problem in the original | Fix in this design |
+|---|---|
+| Students admitted through a second admit status were missed until the trigger was patched | Eligibility is a configurable status grouping, plus a scheduled reconciliation sweep. |
+| A retry after a partial failure could create a duplicate account for the same student | Every create looks the student up first by Salesforce ID, stored on the Google account. |
+| Initial passwords were stored on the student record between jobs | The password is generated, used, and emailed in one job and never stored. |
+| Bulk record updates could fail the user's own save | Work is handed off through Platform Events to a dedicated integration user. |
+| Long and non-Latin names produced broken usernames | A length-budgeted normalization function with fixture tests for hard names. |
+| Failures went unnoticed until someone looked | Sync log records, retries with backoff, and failure alerts. |
 
-### Organization hardening
+## Lifecycle covered
 
-- New org defaults granted the entire shuraku.org domain **Billing Account Creator** and **Project Creator**, meaning every user (including future demo students) could create projects and billing accounts. Removed both from the domain principal. luke@ keeps Organization Administrator.
-- Granted luke@ **Organization Policy Administrator** at the org level to manage the key upload exception. Still held; removal is optional and deferred.
+| Event | Trigger in Salesforce | Action in Google |
+|---|---|---|
+| Joiner | Student reaches an admitted status | Create user in the demo OU, send welcome email |
+| Mover | Status changes | Move OU |
+| Mover | Program or term changes | Update group membership |
+| Leaver | Withdrawn | Suspend |
+| Return | Re-enrolled | Reactivate |
 
-### Custom admin role
+## Architecture
 
-- The Admin console has merged Admin console and Admin API privileges into one "Admin privileges" list. A grant in one is a grant in the other.
-- Role `Directory Sync (Salesforce)`, final privileges:
-  - Users: Create, Read, Update (full bundle: Add/Remove Aliases, Force Password Change, Move Users, Rename Users, Reset Password, Suspend Users)
-  - Groups: Read, Update
-- Organizational Units Read is bundled into the Users privileges per Google's role-to-privilege mapping; no separate OU privilege is needed.
-- **Finding:** with Create, Read, Move Users, and Suspend Users (but not the parent Update), `users.patch` returned 403 "Not Authorized to access this resource/api." The API requires the general Users > Update privilege regardless of which field is changed. The Help Center's statement that Create "automatically grants" Update does not hold for the API.
-- **Finding:** the role editor treats Users > Update as all-or-nothing. Children cannot be deselected while the parent is checked. Accepted the full bundle. Mitigations: non-super-admin roles cannot modify admin accounts; OU-scoped assignment still to be tested.
-- Users > Delete deliberately not granted. Test users are deleted by hand as luke@.
-- Role assigned to the service account via "Assign service accounts." Scope: all organizational units.
-- Created OU `Demo Students` under the root, with a description marking it as demo accounts.
+```
+Salesforce
+  Contact trigger -> eligibility check -> Platform Event
+    -> subscriber (runs as a dedicated integration user)
+         -> one Queueable per record
+              -> GoogleDirectoryClient (Apex)
+                   -> Named Credential
+                        -> External Credential, JWT protocol
+                           (self-signed JWT per callout, signed with a non-exportable key)
+                        -> Google Admin SDK Directory API
+              -> result written back to the record, every call logged
+              -> welcome email from Salesforce after a successful create
+  scheduled reconciliation sweep -> same events
 
-### Key upload exception
+Google Cloud Identity Free
+  service account with a custom admin role (users and groups only)
+  OUs and groups created by hand; the integration manages placement and membership
+```
 
-- The org's security baseline enforces the **legacy** constraint `iam.disableServiceAccountKeyUpload`. The managed constraint `iam.managed.disableServiceAccountKeyUpload` was inactive. (The baseline docs list the managed one; the live org enforced the legacy one.)
-- Overrode the legacy constraint at the **project** level only (enforcement off). Org level stays enforced. Key creation stays disabled.
+## Security design
 
-### Salesforce org and certificate
+- **No super admin in the integration path.** The service account holds a custom admin role. No domain-wide delegation and no admin impersonation, so audit logs show the service account as the actor. Non-super-admin roles cannot modify admin accounts.
+- **The private key never leaves Salesforce.** The key pair is generated in Salesforce with private key export disabled. Only the public certificate is uploaded to Google. No service account key file exists.
+- **No token exchange.** Each callout carries a fresh self-signed JWT valid for two minutes. There are no access tokens to cache, leak, or refresh.
+- **Staff never hold the integration credential.** Users who edit student records don't need callout access. Only the dedicated integration user holds the credential permission set.
+- **Passwords are never stored.** Initial passwords exist only in memory for the one job that creates the account and sends the welcome email.
+- **Google's security baseline stays on.** One documented, project-scoped exception allows public key upload. Service account key creation stays disabled.
+- **Default over-permissions removed.** New Google Cloud orgs let every domain user create projects and billing accounts. That grant is removed.
+- **The integration doesn't build structure.** OUs and groups are created by hand. The integration only places users and manages membership.
+- **Idempotent by design.** Every create looks the user up first by Salesforce ID, stored on the Google user as an external ID.
+- **Demo data only,** in a clearly labeled demo OU.
 
-- Created a fresh Developer Edition org for this project (not shared with the gateway or intake projects). Email: luke@shuraku.org. Username is auto-generated by the new signup flow.
-- Created self-signed certificate `Google_Directory_JWT`: 2048-bit, **Exportable Private Key unchecked**. Platform Encryption option not available in Developer Edition (Shield add-on).
-- Downloaded the public certificate (PEM) and uploaded it to the service account via Keys > Add key > Upload existing key. Accepted on first try.
-- TODO: record the uploaded key's expiration date.
+## Engineering notes from Phase 0
 
-### Salesforce email domain verification
+- Salesforce's OAuth 2.0 JWT Bearer External Credential failed against Google's token endpoint with a blank error, while the identical key and claims succeeded through plain Apex. The JWT protocol (self-signed JWT straight to the API) works and turned out to be the simpler design.
+- The Directory API's user update call requires the general Users > Update privilege for any change, including suspend. The narrower Suspend Users privilege alone returns 403.
+- `customer=my_customer` returns 400 for a service account using its own admin role. Use the domain or customer ID.
+- Reads can lag writes by seconds. The design trusts write responses and lets the reconciliation sweep handle drift.
 
-- Salesforce now only sends from custom domains that have an active DKIM key or a verified Authorized Email Domain.
-- Created DKIM key (2048-bit, selectors `sf1` and `sf2`, domain and match pattern shuraku.org). Added both CNAMEs in Cloudflare as **DNS only** (proxied CNAMEs break DKIM lookups). Activated.
-- Decided not to add Salesforce to the SPF record. Salesforce sends with its own envelope domain, so DKIM provides DMARC alignment and the routing SPF record stays untouched.
+## Stack
 
-### Authentication: what failed and what worked
+- Salesforce (Apex, Flow, Platform Events, Named and External Credentials)
+- Google Cloud Identity Free and the Admin SDK Directory API
+- Cloudflare DNS and Email Routing for the demo domain
 
-- **OAuth 2.0 / JWT Bearer External Credential (failed).** Configured with identity provider `https://oauth2.googleapis.com/token`, iss and sub set to the service account email, aud set to the token URL, a custom `scope` claim, and the uploaded certificate. Every callout failed with "Unable to complete the JWT token exchange. Error: . Error description: ." (blank), status 0 in the debug log, even at Callout FINEST.
-- First run failed earlier with "We couldn't access the credential(s)" until the permission set had External Credential Principal Access and Read on User External Credentials.
-- **Isolating the cause.** The same certificate, claims, and scope succeeded through plain Apex (`Auth.JWT` + `Auth.JWS` + `Auth.JWTBearerTokenExchange`, via a temporary Remote Site Setting), returning status 200 and an access token. Adding `nbf` (the one default claim the External Credential sends that cannot be deleted) also succeeded. Changing or removing `kid` and adding or removing the credential-level Scope field made no difference. Conclusion: the Google side and the claims are correct; the failure is inside the External Credential's token exchange, which also discards Google's error response.
-- **JWT protocol External Credential (works).** Switched to the External Credential "JWT" protocol, which sends a self-signed JWT directly to the API instead of exchanging it for a token. Claims: iss and sub set to the service account email, `aud = https://admin.googleapis.com/`, `kid` set to Google's key ID, no scope claim. Named Credential `Google_Directory_API_v2` with Generate Authorization Header on.
-- Result: no token exchange, no token caching, no auth code. Each callout carries a fresh JWT valid for 120 seconds, signed with the non-exportable key.
+Everything runs on free tiers. The only cost is the demo domain.
 
-### Directory API proof calls
+## What it doesn't do
 
-- `users.list` with `customer=my_customer` returned **400 Invalid Input**. A service account using its own admin role has no "my customer." Using `domain=shuraku.org` returned 200 with luke@.
-- `users.insert` created `phase0.test@shuraku.org` with status 200: placed in `/Demo Students`, `changePasswordAtNextLogin` true, random password (never logged), and `externalIds` storing a Salesforce-style ID under custom type `salesforce_id`.
-- `users.list` with `query=externalId:PHASE0-TEST` returned exactly one match. The idempotency lookup works.
-- `users.patch` with `suspended: true` returned 200 after the Update privilege was added (see Custom admin role).
-- Group membership on a hand-created group (`Only invited users`, no external contact, no external members, not security-labeled): add returned 200, remove returned 204.
-- **Finding:** a members list run about 300 ms after the add did not include the new member. The same list run a minute later did, showing the member as SUSPENDED. This is eventual consistency, not suspended members being hidden. Design rule: trust the write's response; never verify a write by reading it back immediately; let the reconciliation sweep catch drift.
-- **Finding:** Google allows a suspended user to be added to a group, and suspension does not remove existing memberships.
-- Data hygiene: luke@'s givenName had a trailing space from signup. Fixed by hand. Supports trimming in the normalization function.
+- **No account deletion.** Suspension is the end state, consistent with a retention-first policy.
+- **No Temporary Access Pass.** Google has no equivalent, so new accounts get a random initial password that must be changed at first sign-in. Delivering it by email is a documented trade-off.
+- **No Gmail or mailboxes.** Cloud Identity Free provides identities, not mail.
+- **No OU or group management.** OUs and groups are created by hand. The integration only places users and manages membership.
 
-### Cleanup
+This section will grow as the build progresses.
 
-- Deleted the test user and test group.
-- Deleted the failed OAuth 2.0 External Credential and its Named Credential.
-- Deleted both temporary Remote Site Settings (token endpoint and Admin API), which only the Apex experiments needed.
-- Debug logs: none remained to delete.
+## Related projects
 
-### Carried forward
-
-- Record current Directory API limits (name field lengths, email local-part length) and quotas.
-- Test OU-scoped assignment of the custom role (Demo Students only).
-- Record the uploaded key's expiration date and plan rotation.
-- Decide whether to remove Organization Policy Administrator from luke@.
-- Rename the working credentials (drop the `_v2` suffix) or keep them as is.
+- [safe-agent-gateway](https://github.com/LukeStuard/safe-agent-gateway): MCP server connecting AI agents to Salesforce safely
+- [safe-document-intake](https://github.com/LukeStuard/safe-document-intake): serverless Salesforce-to-Google Drive document intake with AI screening

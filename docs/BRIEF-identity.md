@@ -8,11 +8,14 @@ Salesforce as the system of record for identity: student records drive Google ac
 
 This is a clean rebuild of a production integration I built in higher education, where Salesforce provisions Microsoft 365 accounts through Microsoft Graph. Many schools run Google instead of Microsoft, so this version targets Google Cloud Identity. More importantly, it redesigns the parts of the original that failed in production:
 
-| Problem in the original | Fix in this design |
-|---|---|
-| A counter shared across concurrent async jobs overshot its cap | No shared mutable state between jobs. One record per job, state stored on the record. |
-| Students who skipped a pipeline stage were never provisioned | Eligibility is a state check, not a stage transition, and a scheduled reconciliation sweep catches misses. |
-| Long compound names produced broken usernames | A deterministic, length-budgeted normalization function with collision handling and fixture tests. |
+| Lesson | Root cause in the original | Design fix |
+|---|---|---|
+| Students admitted through a second admit status were missed until the flow was patched | The trigger matched an enumerated list of statuses, so any admit status not on the list was skipped | Eligibility is a state predicate ("in any admitted-or-later status, not yet provisioned") driven by one configurable status grouping, plus a scheduled reconciliation sweep that catches anything missed. |
+| A retry after a partial failure could create a second account for the same student | The only guard was the email field, written after the create; a name conflict was treated as a different person and retried with a numeric suffix | Look up by `externalId` (the Salesforce record ID stored on the Google user) before any create. A name conflict means "pick the next name" only when no account exists for this record. Conflicts are detected by status code, not message text. |
+| Initial passwords were stored on the Contact | The password was written to a metadata field for a later job to read, then redacted; a static fallback password existed | Generate the password, create the user, and send the welcome email in one job. The password never touches a field, and there is no static fallback. |
+| Bulk Contact updates could fail the user's own save | One Queueable enqueued per record inside the triggering transaction | The trigger publishes Platform Events. A subscriber running as a dedicated integration user enqueues the work. |
+| Long, compound, and non-Latin names produced broken or degraded usernames | No length cap; an accent map covering a few languages, with everything else stripped; no handling for names that clean down to empty | A documented normalization function with a length budget, trimming, a broad transliteration map, a defined truncation order, empty-part fallback, and fixture tests for hard names. |
+| Failures were found only when someone noticed | Errors logged to debug and a status string; no retry or alerting | Sync log records, a retry policy with backoff, and failure alerts to admin@. |
 
 ## Lifecycle covered
 
