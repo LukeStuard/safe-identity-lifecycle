@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Request_Summary__c</fullName>
+    <description>Method, path, and body with secrets redacted.</description>
+    
+    <label>Request Summary</label>
+    <length>32768</length><type>LongTextArea</type><visibleLines>5</visibleLines>
+</CustomField>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Send_Welcome_Email__c</fullName>
+    <description>Send the welcome email after a successful create.</description>
+    <fieldManageability>DeveloperControlled</fieldManageability>
+    <label>Send Welcome Email</label>
+    <defaultValue>true</defaultValue><type>Checkbox</type>
+</CustomField>
