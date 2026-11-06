@@ -1,0 +1,1 @@
+EventBus.publish(new Directory_Sync_Request__e(Contact_Id__c = 'check3'));

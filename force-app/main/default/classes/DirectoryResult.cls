@@ -41,7 +41,7 @@ public inherited sharing class DirectoryResult {
 
     /** A write that was skipped because dry run is on. */
     public static DirectoryResult dryRunResult() {
-        DirectoryResult r = new DirectoryResult(200, '{}');
+        DirectoryResult r = new DirectoryResult(200, '{"dryRun":true,"note":"Write skipped; no request sent to Google."}');
         r.dryRun = true;
         return r;
     }
