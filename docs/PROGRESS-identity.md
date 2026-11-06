@@ -187,3 +187,19 @@
 - Created the Shuraku University Lightning app (Contacts, Directory Sync Logs, Accounts, Reports), assigned through Directory Sync Admin rather than profiles.
 - Moved development to a second machine (macOS): clone, no-reply commit identity, org login, retrieve of classes that had been deployed but not committed.
 - **Finding:** deploying all of `force-app` overwrote the Default settings record, turning Dry Run back on after it had been switched off in Setup. The repo copy now matches the org (Dry Run off). Custom Metadata records are deployed like code, so the repo is the source of truth for settings; change them in source, not only in Setup.
+## 2026-11-06: Phase 3 mover path
+
+- Decided: flat program and term groups. `Directory_Group_Mapping__mdt` keys on Program and Term with blanks as wildcards, so a cohort group (both keys) can be added later as a record, not code. Six groups created by hand.
+- `DirectoryGroupPlanner` computes desired and managed groups; `DirectoryMover` moves the OU, reads memberships, adds what is missing, and removes managed groups that no longer apply. Unmanaged groups are never touched. 409 on add and 404 on remove count as success. New accounts get groups without a membership read.
+- Phases 3 and 4 kept separate: suspend and reactivate remain plan-only.
+- 73 tests passing. Flow tests now pass with Dry Run on or off.
+- CMDT layouts deployed from source must include `NamespacePrefix`.
+- Live on José García López: groups added (MS Analytics, Fall 2026); status to Enrolled moved the OU with groups unchanged; Program to MBA added MBA and removed MS Analytics, leaving Fall 2026.
+- Directory Sync Logs related list sorted by Log Number with Created Date shown; rows from one job share a timestamp to the second, so date sorting scrambled them.
+## 2026-11-06: Phase 4 leaver and return
+
+- Leaver (Withdrawn, Denied, Cancelled): one users.patch suspends and moves to `/Demo Students/Inactive`, then all managed groups are removed. Sign-in is cut before groups are touched; a failed suspend leaves groups alone and records the error.
+- Return (any Active status on a suspended account): one users.patch reactivates and moves to the status's OU, then groups are restored from the Contact's Program and Term. Stripping groups on suspend costs nothing because membership is derived from the Contact.
+- Contact status is written as Suspended or Active only when the account change succeeded.
+- 78 tests passing.
+- Live on José García López: Withdrawn suspended and moved him with both groups removed; Enrolled reactivated and moved him with both groups restored.

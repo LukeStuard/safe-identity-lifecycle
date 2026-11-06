@@ -1,10 +1,11 @@
 /**
  * One job per Contact.
  *
- * Executes the joiner path (Phase 2) and the mover path for active accounts
- * (Phase 3): OU moves and managed group membership from Program and Term.
- * Suspend and reactivate (Phase 4) are still logged as plans only. With Dry
- * Run on, nothing is written to Google or the Contact; only the plan is logged.
+ * Executes the joiner path (create), the mover path (OU moves and managed
+ * group membership from Program and Term), and the leaver and return paths
+ * (suspend into the Inactive OU with managed groups removed; reactivate into
+ * the status's OU with groups restored from the Contact). With Dry Run on,
+ * nothing is written to Google or the Contact; only the plan is logged.
  *
  * Sharing: with sharing. The integration user sees only Contacts under an
  * Account flagged Directory_Sync_In_Scope__c, through the Directory Sync
@@ -108,24 +109,45 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                 patch = linkExistingAccount(c, lookup, plan);
 
                 Map<String, Object> user = singleUser(lookup);
-                Boolean activeAccount = user != null
-                    && user.get('suspended') != true
-                    && mapping != null
-                    && mapping.Target_State__c == 'Active';
-                if (activeAccount) {
+                String target = mapping == null ? null : mapping.Target_State__c;
+                if (user != null && (target == 'Active' || target == 'Suspended')) {
                     String googleId = (String) user.get('id');
-                    DirectoryMover.Result moved = new DirectoryMover.Result();
-                    DirectoryMover.moveIfNeeded(googleId, (String) user.get('orgUnitPath'), mapping.Target_OU__c, client, moved);
-                    if (moved.success && syncGroups) {
-                        DirectoryMover.syncGroups(googleId, desiredGroups, managedGroups, false, client, moved);
+                    String currentOu = (String) user.get('orgUnitPath');
+                    Boolean isSuspended = user.get('suspended') == true;
+                    DirectoryMover.Result result = new DirectoryMover.Result();
+                    Boolean stateOk;
+
+                    if (target == 'Active') {
+                        // Mover, or return: reactivate first, then restore groups from the Contact.
+                        if (isSuspended) {
+                            stateOk = DirectoryMover.setSuspended(googleId, false, currentOu, mapping.Target_OU__c, client, result);
+                        } else {
+                            DirectoryMover.moveIfNeeded(googleId, currentOu, mapping.Target_OU__c, client, result);
+                            stateOk = result.success;
+                        }
+                        if (stateOk && syncGroups) {
+                            DirectoryMover.syncGroups(googleId, desiredGroups, managedGroups, false, client, result);
+                        }
+                    } else {
+                        // Leaver: cut sign-in first, then strip managed groups.
+                        if (!isSuspended) {
+                            stateOk = DirectoryMover.setSuspended(googleId, true, currentOu, mapping.Target_OU__c, client, result);
+                        } else {
+                            DirectoryMover.moveIfNeeded(googleId, currentOu, mapping.Target_OU__c, client, result);
+                            stateOk = result.success;
+                        }
+                        if (stateOk) {
+                            DirectoryMover.syncGroups(googleId, new Set<String>(), managedGroups, false, client, result);
+                        }
                     }
+
                     if (patch == null) {
                         patch = new Contact(Id = contactId);
                     }
-                    if (moved.success) {
-                        patch.Google_Account_Status__c = 'Active';
+                    if (stateOk) {
+                        patch.Google_Account_Status__c = target;
                     }
-                    record(patch, moved, plan);
+                    record(patch, result, plan);
                 }
             }
         }

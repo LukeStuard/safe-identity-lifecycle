@@ -1,6 +1,7 @@
 /**
- * Mover path for active accounts: OU moves and managed group membership.
- * Callouts only; the job writes results to the Contact and logs afterward.
+ * Mover, leaver, and return paths: OU moves, suspend and reactivate, and
+ * managed group membership. Callouts only; the job writes results to the
+ * Contact and logs afterward.
  *
  * Membership is keyed on the immutable Google user ID. "Already a member"
  * (409) on add and "not a member" (404) on remove count as success, so a
@@ -39,6 +40,32 @@ public inherited sharing class DirectoryMover {
         } else {
             result.fail(r);
         }
+    }
+
+    /**
+     * Suspends or reactivates the account, moving it to the target OU in the
+     * same call when it is elsewhere. Returns true when the change succeeded.
+     */
+    public static Boolean setSuspended(
+        String googleUserId,
+        Boolean suspend,
+        String currentOu,
+        String targetOu,
+        GoogleDirectoryClient client,
+        Result result
+    ) {
+        Map<String, Object> patch = new Map<String, Object>{ 'suspended' => suspend };
+        Boolean moving = String.isNotBlank(targetOu) && targetOu != currentOu;
+        if (moving) {
+            patch.put('orgUnitPath', targetOu);
+        }
+        DirectoryResult r = client.updateUser(googleUserId, patch, suspend ? 'Suspend' : 'Reactivate');
+        if (!r.isSuccess()) {
+            result.fail(r);
+            return false;
+        }
+        result.notes.add((suspend ? 'Suspended' : 'Reactivated') + (moving ? ' and moved to ' + targetOu : '') + '.');
+        return true;
     }
 
     /**

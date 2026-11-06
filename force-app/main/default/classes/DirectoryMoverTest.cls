@@ -157,17 +157,99 @@ private class DirectoryMoverTest {
         Assert.isTrue(planText(c.Id).contains('Failed: forbidden'));
     }
 
+    private static String patchBody(Id contactId, String operation) {
+        return [SELECT Request_Summary__c FROM Directory_Sync_Log__c WHERE Contact__c = :contactId AND Operation__c = :operation][0].Request_Summary__c;
+    }
+
+    private static String status(Id contactId) {
+        return reload(contactId).Google_Account_Status__c;
+    }
+
     @IsTest
-    static void suspendedAccountIsLeftForPhaseFour() {
-        Contact c = student('Enrolled', 'MBA', 'Fall 2026', 'g1');
-        // No PATCH or groups routes: reactivation is plan-only until Phase 4.
+    static void withdrawnSuspendsMovesAndDropsManagedGroups() {
+        Contact c = student('Withdrawn', 'MBA', 'Fall 2026', 'g1');
+        // book-club is unmanaged: no route, so touching it fails the test.
         Test.setMock(HttpCalloutMock.class, new DirectoryMock()
-            .route('GET', '/users', 200, existing('/Demo Students/Inactive', true)));
+            .route('GET', '/users', 200, existing('/Demo Students/Enrolled', false))
+            .route('PATCH', '/users/g1', 200, '{"id":"g1","suspended":true}')
+            .route('GET', '/groups', 200, groups(new List<String>{ MBA, FALL, 'book-club@shuraku.org' }))
+            .route('DELETE', members(MBA) + '/g1', 204, null)
+            .route('DELETE', members(FALL) + '/g1', 204, null));
 
         run(c.Id);
 
+        Assert.areEqual('Suspended', status(c.Id));
+        Assert.isNull(reload(c.Id).Google_Last_Error__c);
+        String body = patchBody(c.Id, 'Suspend');
+        Assert.isTrue(body.contains('"suspended":true'), body);
+        Assert.isTrue(body.contains('"orgUnitPath":"/Demo Students/Inactive"'), 'Suspend and move in one call: ' + body);
+        Assert.areEqual(2, count(c.Id, 'Group Remove'));
+        Assert.areEqual(0, count(c.Id, 'Move'), 'The move rides on the suspend call');
+        String plan = planText(c.Id);
+        Assert.isTrue(plan.startsWith('SUSPEND'), plan);
+        Assert.isTrue(plan.contains('Done: Suspended and moved to /Demo Students/Inactive.'), plan);
+    }
+
+    @IsTest
+    static void returnReactivatesMovesAndRestoresGroups() {
+        Contact c = student('Enrolled', 'MBA', 'Fall 2026', 'g1');
+        Test.setMock(HttpCalloutMock.class, new DirectoryMock()
+            .route('GET', '/users', 200, existing('/Demo Students/Inactive', true))
+            .route('PATCH', '/users/g1', 200, '{"id":"g1","suspended":false}')
+            .route('GET', '/groups', 200, '{}')
+            .route('POST', members(MBA), 200, '{"id":"g1"}')
+            .route('POST', members(FALL), 200, '{"id":"g1"}'));
+
+        run(c.Id);
+
+        Assert.areEqual('Active', status(c.Id));
+        String body = patchBody(c.Id, 'Reactivate');
+        Assert.isTrue(body.contains('"suspended":false'), body);
+        Assert.isTrue(body.contains('"orgUnitPath":"/Demo Students/Enrolled"'), body);
+        Assert.areEqual(2, count(c.Id, 'Group Add'), 'Groups come back from the Contact');
         Assert.isTrue(planText(c.Id).startsWith('REACTIVATE'));
-        Assert.areEqual(0, count(c.Id, 'Move'));
+    }
+
+    @IsTest
+    static void alreadySuspendedOnlyCleansLeftoverGroups() {
+        Contact c = student('Cancelled', 'MBA', 'Fall 2026', 'g1');
+        // No PATCH route: the account is already suspended in Inactive.
+        Test.setMock(HttpCalloutMock.class, new DirectoryMock()
+            .route('GET', '/users', 200, existing('/Demo Students/Inactive', true))
+            .route('GET', '/groups', 200, groups(new List<String>{ MBA }))
+            .route('DELETE', members(MBA) + '/g1', 204, null));
+
+        run(c.Id);
+
+        Assert.areEqual('Suspended', status(c.Id));
+        Assert.areEqual(0, count(c.Id, 'Suspend'));
+        Assert.areEqual(1, count(c.Id, 'Group Remove'));
+    }
+
+    @IsTest
+    static void failedSuspendKeepsGroupsAndRecordsError() {
+        Contact c = student('Denied', 'MBA', 'Fall 2026', 'g1');
+        // No groups routes: groups must not be touched after a failed suspend.
+        Test.setMock(HttpCalloutMock.class, new DirectoryMock()
+            .route('GET', '/users', 200, existing('/Demo Students/Admitted', false))
+            .route('PATCH', '/users/g1', 403, DirectoryMock.error(403, 'forbidden', 'Not Authorized to access this resource/api')));
+
+        run(c.Id);
+
+        Contact after = reload(c.Id);
+        Assert.isNull(after.Google_Account_Status__c, 'Status is not claimed when the change failed');
+        Assert.isTrue(after.Google_Last_Error__c.startsWith('forbidden'), after.Google_Last_Error__c);
+    }
+
+    @IsTest
+    static void suspendWithNoAccountDoesNothing() {
+        Contact c = student('Withdrawn', 'MBA', 'Fall 2026', null);
+        Test.setMock(HttpCalloutMock.class, new DirectoryMock().route('GET', '/users', 200, '{"users":[]}'));
+
+        run(c.Id);
+
+        Assert.isTrue(planText(c.Id).startsWith('NONE'));
+        Assert.isNull(status(c.Id));
     }
 
     @IsTest
