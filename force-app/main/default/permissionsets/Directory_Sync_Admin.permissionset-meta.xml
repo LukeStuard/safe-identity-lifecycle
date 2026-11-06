@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <applicationVisibilities>
+        <application>Shuraku_University</application>
+        <visible>true</visible>
+    </applicationVisibilities>
     <description>For people who run and audit the directory sync: edit demo lifecycle fields on Contact, read Google sync state, and read all sync logs. Does not grant callout access.</description>
     <fieldPermissions>
         <editable>true</editable>
