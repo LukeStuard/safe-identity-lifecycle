@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Directory_Sync_In_Scope__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>When checked, the Directory Sync Scope sharing rule shares this Account and its Contacts with the directory sync integration user. Contacts under any other Account are invisible to the integration.</description>
+    <label>Directory Sync In Scope</label>
+    <type>Checkbox</type>
+</CustomField>

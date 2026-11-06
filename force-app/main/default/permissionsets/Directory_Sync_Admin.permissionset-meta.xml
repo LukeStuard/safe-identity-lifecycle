@@ -2,6 +2,11 @@
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
     <description>For people who run and audit the directory sync: edit demo lifecycle fields on Contact, read Google sync state, and read all sync logs. Does not grant callout access.</description>
     <fieldPermissions>
+        <editable>true</editable>
+        <field>Account.Directory_Sync_In_Scope__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
         <editable>false</editable>
         <field>Contact.Google_Account_Status__c</field>
         <readable>true</readable>
