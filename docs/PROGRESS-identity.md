@@ -90,3 +90,86 @@
 - Record the uploaded key's expiration date and plan rotation.
 - Decide whether to remove Organization Policy Administrator from luke@.
 - Rename the working credentials (drop the `_v2` suffix) or keep them as is.
+## 2026-11-04: Design review and integration user
+
+### Review of the original implementation
+
+- Reviewed the original O365 implementation (create helper, three chained Queueables, V26 trigger flow). Revised the brief's lessons table and the README's "Why this exists" table from the code rather than from memory.
+- Dropped the shared-counter row: that came from an early alpha version limiting a test group, and the code is no longer available.
+- Corrected the missed-students lesson: students admitted through a second admit status were skipped because the trigger matched an enumerated list of statuses. Fix: a configurable status grouping plus the reconciliation sweep.
+- Confirmed all Contacts start with no status, so the Contact trigger is update-only.
+
+### Q6: Platform Event run-as (confirmed by docs)
+
+- `PlatformEventSubscriberConfig` sets the running user for an Apex platform event trigger. The default Automated Process user cannot send email; a specified user can.
+- Applies to Apex triggers only, so the subscriber is an Apex trigger, not a Flow. The Contact side can publish from either.
+- Developer Edition includes one Salesforce Integration license (Enterprise and above get five). One is all this project needs.
+
+### Integration user
+
+- Created `directory-sync@identity-lifecycle.dev`: Salesforce Integration license, Minimum Access - API Only Integrations profile, Salesforce API Integration permission set license. Email luke@shuraku.org for system notices. No password generated; it never logs in.
+- **Check 1 passed:** can hold the `Google Directory Sync` permission set (External Credential Principal Access).
+- **Check 2 passed:** new permission set `Directory Sync Data Access` (Salesforce API Integration license) grants Contact Read/Edit, with field-level access available on standard and custom fields.
+
+### Org-wide email address
+
+- Added and verified `admin@shuraku.org` (display name Shuraku Admissions). Verification email routed to Gmail through Cloudflare.
+- User Selection: System Administrator and Minimum Access - API Only Integrations profiles. The profile list is a multi-select that needs Ctrl+click.
+
+## 2026-11-05: Check 3 (integration user sends email)
+
+### Salesforce DX project
+
+- Scaffolded with `sf project generate --template empty` (no LWC tooling) and moved `sfdx-project.json`, `.forceignore`, `force-app/`, and `config/` into the repo root. Added Salesforce entries to `.gitignore` (`.sf/`, `.sfdx/`, logs).
+- Org alias `identity-dev`, set as the project-local default.
+
+### Platform Event infrastructure (kept for Phase 1)
+
+- Platform Event `Directory_Sync_Request__e`: High Volume, **Publish After Commit**, one field `Contact_Id__c` (Text 18). Created in Setup, retrieved into source.
+- Apex trigger `DirectorySyncRequestTrigger` (after insert). Current body is a Check 3 test that sends one email; Phase 1 replaces it.
+- `PlatformEventSubscriberConfig` `DirectorySyncRequestTriggerConfig` deployed as metadata (not a Tooling API POST), batch size 200, user `directory-sync@identity-lifecycle.dev`.
+- Test publisher: `scripts/apex/check3.apex`, run with `sf apex run`.
+
+### Result: passed
+
+- Email arrived from Shuraku Admissions <admin@shuraku.org>. Gmail shows signed-by shuraku.org (DKIM passing).
+- Debug log under the integration user: `success=true`, 1 of 10 email invocations. Subscription state Running, user Integration Directory Sync.
+- The Integration license and API-only profile can send through the org-wide address with no added Send Email permission. The fallback (a full-license integration user) is not needed.
+
+### Findings
+
+- **The integration user cannot query `OrgWideEmailAddress`** ("sObject type 'OrgWideEmailAddress' is not supported"). The first run failed on that query before reaching the send. The org-wide address ID goes in the config CMDT; no runtime lookup.
+- **`saveAsActivity` defaults to true.** Real email code sets it to false explicitly so the integration user never needs Task create rights.
+- **The Subscriptions table on the event's Setup page stays empty until the first event is delivered.** To verify the running user before then, query `PlatformEventSubscriberConfig` with the Tooling API.
+- Platform event trigger logs are owned by the running user, so the trace flag goes on the integration user.
+
+### Carried forward
+
+- Replace the test trigger body in Phase 1 (hard-coded org-wide address ID moves to CMDT).
+- Remove `Google Directory Sync` from luke's own user once the real trigger runs as the integration user.
+- Phase 1 carry-forwards from Phase 0 still open: Directory API limits and quotas; OU-scoped role assignment; key expiration date; Organization Policy Administrator on luke@; `_v2` credential naming.
+- Key expiration: Google key and Salesforce cert `Google_Directory_JWT` both expire Nov 4, 2027. Rotation overlaps: new non-exportable cert, upload as a second key, switch the External Credential's cert and `kid`, verify with one list call, delete the old key.
+- Removed Organization Policy Administrator from luke@ (org level). Organization Administrator can re-grant it if another policy exception is needed.
+- Renamed credentials in place (no recreate): External Credential `Google_Directory_v2` to `Google_Directory`, Named Credential `Google_Directory_API_v2` to `Google_Directory_API`. Permission set principal access followed the rename; verified with a users.list call (200).
+- **Live smoke test of GoogleDirectoryClient passed:** create in `/Demo Students/Admitted` (200), group add by Google user ID (200), suspend and OU move in one patch (200), group remove by ID (204), four log rows inserted after the last callout with the password redacted. Membership keys on the immutable user ID, never email.
+- **Finding:** the smoke test's four log rows were inserted with every custom field empty. It ran before luke had any field access on `Directory_Sync_Log__c`; anonymous Apex dropped fields the running user could not read. A later insert with read-only access kept its values, and a dry-run insert through the client populated every field. Fields deployed as metadata get no profile access, so all access comes from the two permission sets: `Directory_Sync_Data_Access` (integration user, edit) and `Directory_Sync_Admin` (people, read).
+## 2026-11-05: Phase 1 close-out (client, plumbing, live chain)
+
+### GoogleDirectoryClient
+- `GoogleDirectoryClient`, `DirectoryResult`, routed `DirectoryMock` (throws on any unplanned callout), 12 tests; coverage 95 to 98%. No DML in the client; logs are inserted by the caller after the last callout. Dry run skips writes only. Passwords and hash functions are redacted before logging.
+- Live smoke test passed: create (200), group add by Google user ID (200), suspend and OU move in one patch (200), group remove by ID (204). Membership keys on the immutable user ID.
+- `on` is reserved in Apex (as in `trigger X on Contact`); the mock method is `route()`.
+
+### Event plumbing (plan-only)
+- `ContactDirectoryTrigger` publishes `Directory_Sync_Request__e` when Lifecycle Status, Program, Term, or name changes. No queries, callouts, or jobs in the save path.
+- `DirectorySyncRequestHandler` de-duplicates Contact IDs and enqueues one `DirectorySyncJob` each. Subscriber batch size lowered from 200 to 50 to match the per-transaction enqueue limit.
+- `DirectorySyncPlanner` maps status to a target state (Active, Suspended, None) and decides CREATE, MOVE, REACTIVATE, SUSPEND, NONE, or ERROR. Unmapped statuses fail closed; more than one Google match is an error.
+- `DirectorySyncJob` reads the Contact, looks it up in Google, and logs the plan. No writes to Google in Phase 1. `DirectorySyncFinalizer` logs unhandled failures and falls back to an unlinked row if the Contact link fails.
+- Default settings: Enabled on, Dry Run on. 35 tests passing.
+
+### Findings from the first live run
+- **Private Contacts are invisible to the integration user.** A Contact with no Account is visible only to its owner. `without sharing` made the query work, but the log insert still failed with INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY: lookups require the running user to see the referenced record, even in system mode.
+- **Fix: Account-scoped sharing instead of a bypass.** Account OWD set to Private (Contact Controlled by Parent). New checkbox `Account.Directory_Sync_In_Scope__c`; criteria sharing rule Directory Sync Scope shares in-scope Accounts (read) and their Contacts (read/write) with the Directory Sync Integration group, whose only member is the integration user. `DirectorySyncJob` is back to `with sharing` with no system-mode query.
+- **License-scoped grants:** Read on User External Credentials in `Google Directory Sync` (a standard permission set) did not take effect for the Integration-licensed user. The callout failed with "You don't have read permissions on the User External Credential object" until the grant was added to `Directory_Sync_Data_Access` (Salesforce API Integration license). Phase 1 Check 1 was a false pass: the assignment saved, but not every grant applied.
+- Result: Contact edit, event, subscriber, and job all ran as Integration Directory Sync; Lookup returned 200 and the Plan logged CREATE, linked to the Contact.
+- Removed `Google Directory Sync` from luke's own user. Only the integration user can call Google.

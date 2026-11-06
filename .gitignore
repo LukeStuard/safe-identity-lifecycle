@@ -1,1 +1,23 @@
 evidence-raw/
+
+# Salesforce CLI state and local org metadata (includes org/user details)
+.sf/
+.sfdx/
+.localdevserver/
+deploy-options.json
+
+# Logs
+*.log
+logs/
+
+# LWC tooling (harmless to include even without LWC)
+**/lwc/jsconfig.json
+**/.eslintcache
+node_modules/
+coverage/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+$RECYCLE.BIN/
+.idea/
