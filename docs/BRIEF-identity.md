@@ -5,7 +5,7 @@ Salesforce as the system of record drives Google account lifecycle: create, upda
 Repo: `safe-identity-lifecycle` (working name)
 Progress log: `docs/PROGRESS-identity.md`
 Started: November 4, 2026
-Status: Phase 0 complete. Phase 1 in progress (carry-forwards and setup checks complete; build next).
+Status: Phases 0 through 4 complete (joiner, mover, leaver, and return proven live). Phase 5 next.
 
 ---
 
@@ -45,7 +45,7 @@ These lessons come from a review of the original implementation (create helper, 
 | Changes to business timing rules (a provisioning delay added, then removed) each required a new flow version | Timing lived in flow structure (a scheduled path) | Timing rules such as a provisioning delay live in Custom Metadata, so a policy change is a configuration change. |
 | Missed students were remediated by hand through anonymous Apex, and a designed backstop sweep was never built | No supported retry path; the safety net stayed on the to-do list | The reconciliation sweep is part of v1, and a "reprovision" action on the record replaces ad hoc scripts. |
 
-Kept from the original: an **inclusion list** for "still qualified" statuses, chosen deliberately because it fails closed (a new or unexpected status never provisions by accident); a result wrapper carrying status, parsed JSON, and raw body; a Named Credential with no token handling in Apex; feature toggles and a dry-run mode in Custom Metadata; HTML-escaping in the welcome email; and redacting secrets from raw responses.
+Kept from the original: an **inclusion list** for "still qualified" statuses, chosen deliberately because it fails closed (a new or unexpected status never provisions by accident); a result wrapper carrying status, parsed JSON, and raw body; a Named Credential with no token handling in Apex; feature toggles and a dry-run mode in Custom Metadata; and redacting secrets from raw responses. The original HTML-escaped its welcome email; this one is plain text, so there is nothing to escape.
 
 ### Real-world context
 
@@ -81,7 +81,15 @@ How the original sits in the institution's pipeline, from past work on the produ
 - **The subscriber runs as a dedicated integration user,** set through `PlatformEventSubscriberConfig` (deployed as metadata). The default Automated Process user cannot send email; a specified user can. Run-as configuration applies to Apex subscribers only, so the subscriber is an Apex trigger, not a Flow.
 - **Integration user** `directory-sync@identity-lifecycle.dev`: Salesforce Integration license (Developer Edition includes one), Minimum Access - API Only Integrations profile, Salesforce API Integration permission set license. It never logs in.
 - **Org checks passed:** it can hold the `Google Directory Sync` permission set (External Credential Principal Access); it can be granted Contact Read/Edit with field-level access on standard and custom fields through `Directory Sync Data Access`; and it can send email through the org-wide address from the subscriber trigger.
-- **Only the integration user holds `Google Directory Sync`** once the real trigger is in place. Staff who edit Contacts never hold the callout credential.
+- **Only the integration user holds `Google Directory Sync`.** Removed from luke's own user at the end of Phase 1. Staff who edit Contacts never hold the callout credential.
+- **License-scoped grants:** Read on User External Credentials, granted in `Google Directory Sync` (a standard permission set), did not take effect for the Integration-licensed user. The grant had to live in `Directory Sync Data Access`, which is built on the Salesforce API Integration license. Assigning a permission set is not proof that every grant in it applies.
+
+### Record access
+
+- **Account-scoped sharing, not a bypass.** Account org-wide default is Private and Contact is Controlled by Parent. A checkbox, `Account.Directory_Sync_In_Scope__c`, marks in-scope Accounts; the criteria sharing rule Directory Sync Scope shares them Read/Write with the Directory Sync Integration group, whose only member is the integration user. The job runs `with sharing` and sees only those Contacts.
+- **Why Read/Write on the Account rule:** with Contact Controlled by Parent, a sharing rule has no separate Contact access; Contacts inherit the Account level. The integration user's permission set grants only Read on the Account object, so it still cannot edit Accounts.
+- **Private Contacts** (no Account) are invisible to the integration user, and lookups to a record the running user cannot see fail even in system mode. Demo Contacts live under the Demo Students Account.
+- **People** get `Directory Sync Admin`: edit on the demo lifecycle fields, read-only on sync state, read-only on the logs (View All), the log tab, and the Shuraku University app. Profiles grant nothing; fields and objects deployed from source get no profile access.
 
 ### Authentication from Salesforce
 
@@ -96,7 +104,7 @@ How the original sits in the institution's pipeline, from past work on the produ
 ### Email
 
 - **Initial credentials:** Google has no Temporary Access Pass equivalent. Accounts get a random initial password with `changePasswordAtNextLogin = true`. See Risks.
-- **Welcome message:** sent by Salesforce to the student's personal email, only after the Google create call succeeds.
+- **Welcome message:** "Your Shuraku University Student Account", sent by Salesforce to the student's personal email, only after the Google create call succeeds and after every callout in the job. Plain text, with the username, temporary password, and sign-in link. Sent only when the job has just created the account and holds its password; a linked or adopted account gets no email.
 - **Why Salesforce sends it, not Google:** the original sent through Microsoft Graph, which bundles directory and mail in one API. Google splits them. Cloud Identity Free has no mailboxes, the Directory API cannot send mail, and sending through the Gmail API would require domain-wide delegation and user impersonation, which the design rules out. Salesforce email keeps the service account's scope to directory work only.
 - **Sender:** org-wide address `admin@shuraku.org` (display name Shuraku Admissions), verified, available to the System Administrator and Minimum Access - API Only Integrations profiles. Sent from the subscriber trigger as the integration user (Check 3 passed; DKIM signed by shuraku.org).
 - **The integration user cannot query `OrgWideEmailAddress`,** so the address ID lives in Custom Metadata rather than being looked up at runtime.
@@ -105,16 +113,44 @@ How the original sits in the institution's pipeline, from past work on the produ
 - **Inbound:** Cloudflare Email Routing (free). Cloudflare Email Sending requires Workers Paid and is out of scope.
 - **Demo users** live in the `Demo Students` OU. Email Routing catch-all stays off, so mail to demo addresses bounces.
 
+### Usernames
+
+- **Format:** `first.last@shuraku.org`, lowercase. Parenthetical nicknames dropped; accents transliterated (José to jose, Müller to mueller, ß to ss); apostrophes dropped; periods treated as spaces; spaces removed in first names and turned into hyphens in last names; only `a-z`, `0-9`, `.`, and `-` emitted.
+- **Fallbacks:** a part that cleans to nothing falls back to the other part; if both are empty (a name entirely in a non-Latin script), the username is `student.` plus six characters of the Contact ID.
+- **Length:** the base is capped at 62 characters, last name trimmed first, so a collision suffix up to 99 always fits Google's 64. Display names keep Unicode and are capped at 40.
+- **Collisions:** on a 409, the job fetches the account holding the name. If it carries this Contact's `salesforce_id`, it is this student's account (an earlier run that failed after the create) and is linked, not duplicated. Otherwise the next suffix is tried, up to 10.
+- **Source data decides username quality.** The normalizer follows the first and last name fields as entered. A double surname typed partly into First Name produces a different username, and no code can tell a middle name from a first surname. Only the form, or the person, can.
+
+### Job design
+
+- **One job per Contact, in a fixed order:** read the Contact, look the user up by `salesforce_id`, plan, make every callout, send the welcome email, then write the Contact and logs. DML before a callout would block the callout, and email is only sent when the transaction commits.
+- **Google work is not rolled back by a Salesforce failure.** When a write-back failed after a successful create, the transaction rolled back the email and logs but the account remained. The next run found it by `salesforce_id` and linked it without a duplicate. This is why every run looks up before it creates.
+- **Settings are source-controlled.** Custom Metadata records deploy like code; a full deploy overwrote a Dry Run change made in Setup. Change settings in source.
+- **Tests do not depend on org settings.** The job takes test settings through instance fields (which travel with an enqueued job), and the flow tests pass with Dry Run on or off.
+
+### Groups
+
+- **Flat program and term groups**, six created by hand. `Directory_Group_Mapping__mdt` keys on Program and Term; a blank key matches anything, so a cohort group (both keys filled) can be added later as a record, not code.
+- **Only managed groups are touched.** The job reads a user's groups, adds what is missing, and removes mapped groups that no longer apply. Any other group is left alone. "Already a member" (409) and "not a member" (404) count as success, so retries converge.
+- **Membership keys on the immutable Google user ID**, never the email address.
+- **Suspend strips managed groups; return restores them** from the Contact's Program and Term. Nothing has to remember prior memberships because the Contact is the source.
+
+### Lifecycle state
+
+- **Status mapping** (`Directory_Status_Mapping__mdt`) gives each status a target state and OU: Admitted and Admit with Conditions to Active in `/Demo Students/Admitted`; Enrolled and Alumni to Active in their OUs; Withdrawn, Denied, and Cancelled to Suspended in `/Demo Students/Inactive`; Applied to no action. A status with no record fails closed.
+- **Suspend and move in one call; reactivate and move in one call.** Sign-in is cut before groups are touched; a failed suspend leaves groups alone. The Contact shows Suspended or Active only when the account change succeeded.
+
 ### API behavior the design depends on (proven in Phase 0)
 
 - Use `domain=shuraku.org` (or the customer ID) for list calls. `customer=my_customer` returns 400 for a service account using its own admin role.
 - `externalIds` with custom type `salesforce_id` stores the Salesforce record ID on the Google user, and `query=externalId:<id>` finds it. This is the idempotency lookup.
 - **Eventual consistency:** a read immediately after a write may not reflect it. Trust the write's response; never verify by reading back immediately; the reconciliation sweep handles drift.
 - Suspended users can be group members, and suspension does not remove memberships.
+- **`groups.list` needs `domain` too.** With only `userKey`, the service account got 404 "Domain not found"; the API requires `customer` or `domain`, and a service account has no default customer. Key-based calls (users.get, users.patch, members insert and delete) need neither.
 
 ### Directory API limits (from Google's docs)
 
-- **Names:** Google's docs disagree. The users resource reference and the Help Center allow 60 characters for given and family names; the Limits page says 40. The normalizer budgets to 40, and a 41 to 60 character fixture in Phase 2 settles which the API enforces.
+- **Names:** Google's docs disagree. The users resource reference and the Help Center allow 60 characters for given and family names; the Limits page says 40. The normalizer budgets to 40; a live 41 to 60 character create (carried to Phase 5) settles which the API enforces.
 - **Usernames (local part):** up to 64 characters, lowercase, no consecutive periods, cannot begin or end with a period. Google allows apostrophes and some symbols but warns they break downstream sync tools, so the normalizer emits only `a-z`, `0-9`, `.`, and `-`.
 - **Passwords:** 8 to 100 ASCII characters.
 - **Rate limits:** user creates capped at 10 per domain per second; default quota 2,400 queries per minute per user per project. One record per job stays far below both.
@@ -139,7 +175,12 @@ How the original sits in the institution's pipeline, from past work on the produ
 | DKIM key active for shuraku.org | Done |
 | Org-wide address admin@shuraku.org verified | Done |
 | Integration user, `Directory Sync Data Access` permission set | Done |
-| Platform Event `Directory_Sync_Request__e`, subscriber trigger, subscriber config (run as integration user) | Done (trigger body is a test stub) |
+| Platform Event `Directory_Sync_Request__e`, subscriber trigger, subscriber config (run as integration user, batch 50) | Done |
+| Child OUs Admitted, Enrolled, Alumni, Inactive under Demo Students | Done |
+| Six program and term groups (Only invited users, no external members) | Done |
+| Account org-wide default Private; Directory Sync Scope sharing rule; Demo Students Account | Done |
+| `Directory Sync Admin` permission set; Directory Sync Logs tab; Shuraku University app | Done |
+| Custom Metadata: settings, status mapping, group mapping (with page layouts) | Done |
 | Proof calls: list, create, find by externalId, suspend, group add/remove | Passed |
 | Integration user checks: credential permission set, Contact access, email send | Passed |
 | Directory API limits and quotas recorded | Done |
@@ -149,20 +190,22 @@ How the original sits in the institution's pipeline, from past work on the produ
 
 ```
 Salesforce (system of record)
-  Contact trigger (update)
-    -> eligibility predicate (configurable status grouping)
+  Contact trigger (update; status, program, term, or name changed)
     -> publish Directory_Sync_Request__e (Publish After Commit)
   Platform Event subscriber (Apex trigger, runs as dedicated integration user)
-    -> enqueue one job per record (Queueable + Finalizer)
-         -> GoogleDirectoryClient (Apex)
-              -> Named Credential Google_Directory_API (Generate Authorization Header)
+    -> enqueue one DirectorySyncJob per Contact (Queueable + Finalizer)
+         -> read the Contact (with sharing: in-scope Accounts only)
+         -> GoogleDirectoryClient: look up by salesforce_id
+         -> DirectorySyncPlanner: target state from the status mapping
+         -> DirectoryJoiner (create) or DirectoryMover (move, suspend,
+            reactivate, managed group sync)
+              -> Named Credential Google_Directory_API
                    -> External Credential Google_Directory, JWT protocol
                       (self-signed JWT per callout, non-exportable key)
                    -> Google Admin SDK Directory API
-         -> write result back to the record
-         -> on success: welcome email (org-wide address, DKIM)
-         -> on failure: error state on record + sync log entry
-  Scheduled reconciliation sweep
+         -> welcome email after the last callout (org-wide address, DKIM)
+         -> write state to the Contact; insert every call's log row
+  Scheduled reconciliation sweep (Phase 5)
     -> finds eligible-but-unprovisioned and drifted records
     -> flags Google users with a salesforce_id outside the student OU tree
     -> publishes the same events
@@ -180,19 +223,19 @@ Design principles:
 - **State on the record.** Status, primary email, Google user ID, last sync time, last error.
 - **Trust writes, reconcile later.** No read-after-write verification; the sweep catches drift.
 - **Every call logged** to a sync log object for audit and troubleshooting.
-- **Configuration in Custom Metadata.** Status grouping, feature toggles, dry-run mode, provisioning delay, target OU, and the org-wide address ID.
+- **Configuration in Custom Metadata.** Settings (enabled, dry run, welcome email, provisioning delay, domain, org-wide address ID), status mapping (target state, OU, group sync), and group mapping.
 - **Least privilege at every layer.** Custom role instead of super admin, no domain-wide delegation, no structure management, non-exportable key, one narrow policy exception, and the callout credential held only by the integration user.
 
 ## 6. Lifecycle scope
 
 | Event | Salesforce trigger (demo data) | Google action |
 |---|---|---|
-| Joiner | Enters any admitted-or-later status, not yet provisioned | Create user in Demo Students, set externalId, send welcome email |
-| Mover | Status changes (e.g. Admitted to Enrolled to Alumni) | Move OU |
-| Mover | Program or term changes | Update group memberships |
-| Update | Name change | Update display name. Primary email handling is an open question. |
-| Leaver | Withdrawn, Denied, or Cancelled | Suspend. Group membership handling is an open question. |
-| Return | Re-enrolled | Reactivate |
+| Joiner | Enters an Active status, no account yet | Create in the status's OU with `salesforce_id`, add program and term groups, send welcome email |
+| Mover | Status changes between Active statuses | Move OU |
+| Mover | Program or term changes | Add and remove managed groups |
+| Update | Name change | Not yet handled; see open question 1 |
+| Leaver | Withdrawn, Denied, or Cancelled | Suspend and move to Inactive in one call, then remove managed groups |
+| Return | Back to an Active status | Reactivate and move in one call, then restore groups from the Contact |
 
 Deletion is out of scope for v1. Suspend is the end state, consistent with a retention-first policy.
 
@@ -203,27 +246,25 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 **Phase 0: Tenant and proof of API access** (complete)
 - All environment items in section 4.
 
-**Phase 1: Salesforce foundation** (in progress)
-- Done: Directory API limits recorded; OU-scoped assignment ruled out for service accounts; Platform Event run-as verified; integration user created and checked (credential, Contact access, email); org-wide address verified; credentials renamed; key expiration recorded.
-- Contact sync and demo lifecycle fields, the Custom Metadata configuration (status grouping, toggles, delay, target OU, org-wide address ID), and the sync log object.
-- `GoogleDirectoryClient` with `HttpCalloutMock` tests, including error branching on `reason`.
-- Replace the test body of `DirectorySyncRequestTrigger`.
-- Remove `Google Directory Sync` from luke's own user once the real trigger runs as the integration user.
+**Phase 1: Salesforce foundation** (complete)
+- Data model, sync log, Custom Metadata settings and status mapping; `GoogleDirectoryClient` with a routed callout mock; event plumbing running as the integration user; Account-scoped sharing. Moved: the real trigger body replaced the test stub.
 
-**Phase 2: Joiner path**
-- Eligibility predicate, normalization function with fixture tests (including a 41 to 60 character name and an apostrophe name), idempotent create, Demo Students placement.
-- Welcome email: record the Developer Edition daily email limit and check Email Deliverability settings.
+**Phase 2: Joiner path** (complete)
+- Normalizer with 20 name fixtures (including an apostrophe name), idempotent create with collision handling, welcome email. Proven live, including recovery from a create whose write-back failed. Moved to Phase 5: the live 41 to 60 character name create and recording the Developer Edition daily email limit.
 
-**Phase 3: Mover path**
-- OU moves and group membership changes.
+**Phase 3: Mover path** (complete)
+- OU moves and managed group sync from Program and Term, proven live. Found: `groups.list` needs `domain` for a service account.
 
-**Phase 4: Leaver and return**
-- Suspend and reactivate, with the group membership decision applied.
+**Phase 4: Leaver and return** (complete)
+- Suspend into Inactive with groups removed; reactivate with groups restored. Proven live.
 
 **Phase 5: Reconciliation and operations**
 - Scheduled sweep, including the out-of-tree check.
 - Error handling and retry policy with backoff (delayed Queueables).
 - Failure alerts to admin@ (verified destination address, so free).
+- Reprovision action on the Contact: password reset plus a new welcome email, replacing ad hoc scripts.
+- Carried from Phase 2: live 41 to 60 character name create; record the Developer Edition daily email limit.
+- Decide and build name changes (open question 1).
 
 **Phase 6: Write-up**
 - README (including "What it doesn't do"), redacted screenshots, LinkedIn post.
@@ -249,8 +290,10 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 - **Long-lived signing key.** The uploaded key does not rotate on its own and expires November 4, 2027. Mitigation: overlapping rotation (see Decisions) before expiry.
 - **Self-signed JWT support.** The design depends on the Directory API continuing to accept self-signed JWTs. Fallback: the proven Apex token exchange.
 - **Eventual consistency.** Reads can lag writes. The design never depends on immediate read-back.
-- **Conflicting name limits in Google's docs.** Budgeting to 40 characters is safe either way; the Phase 2 fixture records the real limit.
-- **Developer Edition email limits.** Low daily cap on outbound email. Record the current number in Phase 2.
+- **Conflicting name limits in Google's docs.** Budgeting to 40 characters is safe either way; a Phase 5 live create records the real limit.
+- **Developer Edition email limits.** Low daily cap on outbound email. Record the current number in Phase 5.
+- **Partial failures across systems.** A Salesforce failure cannot undo a Google write. Mitigation: every run looks up by `salesforce_id` first and links what it finds; a lost temporary password needs a reset (the Phase 5 reprovision action).
+- **Name quality depends on data entry.** Usernames follow the name fields as entered; a wrong split produces a valid but wrong username, fixable only through the rename path.
 - **Cloud Identity Free user cap** is 50. The reconciliation sweep must not create users in a loop.
 - **Google API quotas.** Recorded (see Decisions). Retries back off and branch on error reason.
 
@@ -261,12 +304,13 @@ Resolved:
 - **Automation user:** a Platform Event subscriber running as a dedicated, API-only integration user. Confirmed by Salesforce docs and three org checks (see Decisions).
 - **OU-scoped role assignment:** not available for service accounts. Accepted a domain-wide role with compensating controls (see Decisions).
 - **Denied or Cancelled after provisioning:** suspend automatically, same as Withdrawn. Suspension is reversible, and the Return path reactivates if the status moves back to an admit status.
+- **Group model (was question 2):** flat program and term groups, with cohort groups possible later as configuration (see Decisions).
+- **Memberships on suspend (was question 4):** remove managed groups on suspend; restore them from the Contact on return.
+- **Username format:** `first.last`, with the rules in Decisions.
 
 Open:
-1. **Name changes:** keep the primary email and add the new name as an alias, or rename the primary email?
-2. **Group model:** groups by program, by term, or both?
+1. **Name changes:** keep the primary email and add the new name as an alias, or rename the primary email? Test case: the demo Contact entered as "José García" / "López" (`josegarcia.lopez@shuraku.org`); correcting it to "José" / "García López" exercises the rename path.
 3. **Security-labeled groups:** should the real program and term groups carry the security label (permanent once applied) if they will drive access, such as SSO app assignment?
-4. **Memberships on suspend:** remove a suspended student from their groups (cleaner if groups grant access), or keep memberships so reactivation restores them automatically?
 5. **Duplicate Contacts:** the `externalId` lookup prevents a second account for the same Contact, but not for the same person with two Contacts (for example, a returning applicant who registers again). Add a pre-create check on personal email that flags a possible duplicate for review instead of creating an account?
 
 
@@ -279,6 +323,7 @@ Open:
 - Workload Identity Federation spike: test whether Salesforce can act as an OIDC issuer for Google, removing the long-lived key entirely.
 - SSO hub: Google as IdP over SAML into Salesforce and my other apps.
 - Incident response case study on the same tenant.
+- Cohort groups (program and term together) as Custom Metadata records, if cohort communication is needed.
 
 ## 12. References
 
@@ -293,4 +338,5 @@ Open:
 - Salesforce: Set Up JWT Claims for External Credentials: https://help.salesforce.com/s/articleView?id=xcloud.nc_jwt_claims.htm&language=en_US&type=5
 - Salesforce: OAuth External Credential with the JWT Bearer Flow: https://help.salesforce.com/s/articleView?language=en_US&id=xcloud.nc_create_edit_oath_jwt_bearer_ext_cred.htm&type=5
 - Salesforce: PlatformEventSubscriberConfig (Tooling API): https://developer.salesforce.com/docs/atlas.en-us.api_tooling.meta/api_tooling/tooling_api_objects_platformeventsubscriberconfig.htm
+- Google: Directory API groups.list (customer or domain required): https://developers.google.com/admin-sdk/directory/reference/rest/v1/groups/list
 - Cloud Identity editions: https://cloud.google.com/identity/docs/editions
