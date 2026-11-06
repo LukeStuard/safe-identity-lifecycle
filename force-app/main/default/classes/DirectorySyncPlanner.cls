@@ -16,6 +16,10 @@ public inherited sharing class DirectorySyncPlanner {
         public List<String> steps = new List<String>();
 
         public Directory_Sync_Log__c toLog(Id contactId, String status, Directory_Status_Mapping__mdt mapping) {
+            return toLog(contactId, status, mapping, true);
+        }
+
+        public Directory_Sync_Log__c toLog(Id contactId, String status, Directory_Status_Mapping__mdt mapping, Boolean dryRun) {
             String target = mapping == null
                 ? 'no mapping'
                 : mapping.Target_State__c + (String.isBlank(mapping.Target_OU__c) ? '' : ' in ' + mapping.Target_OU__c);
@@ -27,7 +31,7 @@ public inherited sharing class DirectorySyncPlanner {
                 Contact__c = contactId,
                 Operation__c = 'Plan',
                 Success__c = action != 'ERROR',
-                Dry_Run__c = true,
+                Dry_Run__c = dryRun == true,
                 Error_Reason__c = errorReason,
                 Request_Summary__c = 'Status "' + status + '" -> ' + target,
                 Response_Summary__c = detail

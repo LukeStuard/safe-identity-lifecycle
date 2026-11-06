@@ -53,6 +53,11 @@ public inherited sharing class GoogleDirectoryClient {
         return send('GET', path, null, 'Lookup', false);
     }
 
+    /** users.get by primary email, alias, or Google user ID. Used to tell whose name a 409 belongs to. */
+    public DirectoryResult getUser(String userKey) {
+        return send('GET', '/users/' + enc(userKey), null, 'Lookup', false);
+    }
+
     public DirectoryResult createUser(Map<String, Object> user) {
         return send('POST', '/users', JSON.serialize(user), 'Create', true);
     }
