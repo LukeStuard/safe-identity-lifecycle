@@ -21,8 +21,17 @@ private class DirectorySyncFlowTest {
         return rows;
     }
 
+    /**
+     * The job enqueued by the subscriber reads settings on its own, so these
+     * routes also cover a live (non-dry-run) create. Distinct IDs keep the
+     * unique Google_User_Id__c happy in the bulk test.
+     */
     private static void mockNoGoogleUsers() {
-        Test.setMock(HttpCalloutMock.class, new DirectoryMock().route('GET', '/users', 200, '{"users":[]}'));
+        Test.setMock(HttpCalloutMock.class, new DirectoryMock()
+            .route('GET', '/users', 200, '{"users":[]}')
+            .route('POST', '/users', 200, '{"id":"g-flow-1","primaryEmail":"demo.student0@shuraku.org"}')
+            .route('POST', '/users', 200, '{"id":"g-flow-2","primaryEmail":"demo.student1@shuraku.org"}')
+            .route('POST', '/users', 200, '{"id":"g-flow-3","primaryEmail":"demo.student2@shuraku.org"}'));
     }
 
     private static List<Directory_Sync_Log__c> logs(String operation) {
@@ -57,7 +66,6 @@ private class DirectorySyncFlowTest {
         List<Directory_Sync_Log__c> plans = logs('Plan');
         Assert.areEqual(1, plans.size());
         Assert.areEqual(c.Id, plans[0].Contact__c);
-        Assert.isTrue(plans[0].Dry_Run__c);
         Assert.isTrue(plans[0].Response_Summary__c.startsWith('CREATE'));
     }
 

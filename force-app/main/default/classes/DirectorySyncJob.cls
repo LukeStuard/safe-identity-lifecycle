@@ -1,11 +1,10 @@
 /**
  * One job per Contact.
  *
- * Phase 2: executes the joiner path (CREATE) and links existing Google
- * accounts the Contact does not know about. Other planned actions (move,
- * suspend, reactivate) are still logged as plans only; they arrive in
- * Phases 3 and 4. With Dry Run on, nothing is written to Google or the
- * Contact, and only the plan is logged.
+ * Executes the joiner path (Phase 2) and the mover path for active accounts
+ * (Phase 3): OU moves and managed group membership from Program and Term.
+ * Suspend and reactivate (Phase 4) are still logged as plans only. With Dry
+ * Run on, nothing is written to Google or the Contact; only the plan is logged.
  *
  * Sharing: with sharing. The integration user sees only Contacts under an
  * Account flagged Directory_Sync_In_Scope__c, through the Directory Sync
@@ -23,6 +22,8 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
     @TestVisible
     private Directory_Sync_Setting__mdt injectedSettings;
     @TestVisible
+    private List<Directory_Group_Mapping__mdt> injectedGroupMappings;
+    @TestVisible
     private Boolean forceEmailFailure = false;
 
     public DirectorySyncJob(Id contactId) {
@@ -33,7 +34,7 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         System.attachFinalizer(new DirectorySyncFinalizer(contactId));
 
         List<Contact> rows = [
-            SELECT Id, FirstName, LastName, Email, Lifecycle_Status__c, Google_User_Id__c
+            SELECT Id, FirstName, LastName, Email, Lifecycle_Status__c, Program__c, Term__c, Google_User_Id__c
             FROM Contact
             WHERE Id = :contactId
             LIMIT 1
@@ -62,10 +63,24 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         List<Directory_Sync_Log__c> extraLogs = new List<Directory_Sync_Log__c>();
 
         if (!dryRun) {
+            List<Directory_Group_Mapping__mdt> groupRows =
+                injectedGroupMappings != null ? injectedGroupMappings : DirectoryGroupPlanner.allMappings();
+            Boolean syncGroups = mapping != null && mapping.Sync_Groups__c == true;
+            Set<String> desiredGroups = DirectoryGroupPlanner.desired(c.Program__c, c.Term__c, groupRows);
+            Set<String> managedGroups = DirectoryGroupPlanner.managed(groupRows);
+
             if (plan.action == 'CREATE') {
                 Boolean sendWelcome = settings.Send_Welcome_Email__c == true;
                 DirectoryJoiner.Outcome outcome = DirectoryJoiner.create(c, mapping, settings.Domain__c, sendWelcome, client);
                 patch = outcome.toContact(contactId);
+
+                if (outcome.success && syncGroups) {
+                    DirectoryMover.Result groups = new DirectoryMover.Result();
+                    DirectoryMover.syncGroups(
+                        outcome.googleUserId, desiredGroups, managedGroups, !outcome.adopted, client, groups
+                    );
+                    record(patch, groups, plan);
+                }
 
                 // All callouts are done. The email goes out before any DML.
                 if (outcome.adopted) {
@@ -91,6 +106,27 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                 );
             } else {
                 patch = linkExistingAccount(c, lookup, plan);
+
+                Map<String, Object> user = singleUser(lookup);
+                Boolean activeAccount = user != null
+                    && user.get('suspended') != true
+                    && mapping != null
+                    && mapping.Target_State__c == 'Active';
+                if (activeAccount) {
+                    String googleId = (String) user.get('id');
+                    DirectoryMover.Result moved = new DirectoryMover.Result();
+                    DirectoryMover.moveIfNeeded(googleId, (String) user.get('orgUnitPath'), mapping.Target_OU__c, client, moved);
+                    if (moved.success && syncGroups) {
+                        DirectoryMover.syncGroups(googleId, desiredGroups, managedGroups, false, client, moved);
+                    }
+                    if (patch == null) {
+                        patch = new Contact(Id = contactId);
+                    }
+                    if (moved.success) {
+                        patch.Google_Account_Status__c = 'Active';
+                    }
+                    record(patch, moved, plan);
+                }
             }
         }
 
@@ -108,16 +144,37 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         return mapping != null && String.isNotBlank(mapping.Target_State__c) && mapping.Target_State__c != 'None';
     }
 
+    private static Map<String, Object> singleUser(DirectoryResult lookup) {
+        if (lookup == null || !lookup.isSuccess() || GoogleDirectoryClient.userCount(lookup) != 1) {
+            return null;
+        }
+        return GoogleDirectoryClient.firstUser(lookup);
+    }
+
+    /** Copies a mover result onto the Contact update and the plan log. */
+    private static void record(Contact patch, DirectoryMover.Result r, DirectorySyncPlanner.Plan plan) {
+        for (String note : r.notes) {
+            plan.steps.add('Done: ' + note);
+        }
+        patch.Google_Last_Sync__c = System.now();
+        if (r.success) {
+            patch.Google_Last_Error__c = null;
+        } else {
+            plan.steps.add('Failed: ' + r.errorReason + (String.isBlank(r.errorMessage) ? '' : ' (' + r.errorMessage + ')'));
+            patch.Google_Last_Error__c = (r.errorReason + (String.isBlank(r.errorMessage) ? '' : ': ' + r.errorMessage)).left(255);
+        }
+    }
+
     /**
      * If Google has exactly one account carrying this Contact's ID and the
      * Contact does not record it (a run that failed after the create), write
      * the account back to the Contact.
      */
     private static Contact linkExistingAccount(Contact c, DirectoryResult lookup, DirectorySyncPlanner.Plan plan) {
-        if (lookup == null || !lookup.isSuccess() || GoogleDirectoryClient.userCount(lookup) != 1) {
+        Map<String, Object> user = singleUser(lookup);
+        if (user == null) {
             return null;
         }
-        Map<String, Object> user = GoogleDirectoryClient.firstUser(lookup);
         String googleId = (String) user.get('id');
         if (googleId == null || googleId == c.Google_User_Id__c) {
             return null;

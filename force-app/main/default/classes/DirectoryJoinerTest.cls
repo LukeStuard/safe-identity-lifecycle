@@ -116,7 +116,8 @@ private class DirectoryJoinerTest {
         Test.setMock(HttpCalloutMock.class, new DirectoryMock()
             .route('GET', '/users', 200, NO_USERS)
             .route('POST', '/users', 409, DirectoryMock.error(409, 'duplicate', 'Entity already exists.'))
-            .route('GET', TAKEN_NAME_PATH, 200, userJson('g-mine', 'jane.doe@shuraku.org', String.valueOf(c.Id))));
+            .route('GET', TAKEN_NAME_PATH, 200, userJson('g-mine', 'jane.doe@shuraku.org', String.valueOf(c.Id)))
+            .route('GET', '/groups', 200, '{}'));
 
         run(c.Id, settings(false, true), false);
 
@@ -134,7 +135,8 @@ private class DirectoryJoinerTest {
         // No POST route: any create attempt would fail the test.
         Test.setMock(HttpCalloutMock.class, new DirectoryMock()
             .route('GET', '/users', 200,
-                '{"users":[{"id":"g-102","primaryEmail":"jane.doe@shuraku.org","orgUnitPath":"/Demo Students/Enrolled","suspended":false}]}'));
+                '{"users":[{"id":"g-102","primaryEmail":"jane.doe@shuraku.org","orgUnitPath":"/Demo Students/Enrolled","suspended":false}]}')
+            .route('GET', '/groups', 200, '{}'));
 
         run(c.Id, settings(false, true), false);
 

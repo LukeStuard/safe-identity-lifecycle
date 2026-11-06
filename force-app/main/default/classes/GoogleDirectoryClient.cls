@@ -85,7 +85,7 @@ public inherited sharing class GoogleDirectoryClient {
 
     /** Groups the user currently belongs to. */
     public DirectoryResult listMemberships(String googleUserId) {
-        return send('GET', '/groups?userKey=' + enc(googleUserId) + '&maxResults=200', null, 'Lookup', false);
+        return send('GET', '/groups?domain=' + enc(domain) + '&userKey=' + enc(googleUserId) + '&maxResults=200', null, 'Lookup', false);
     }
 
     // ---------------------------------------------------------------
