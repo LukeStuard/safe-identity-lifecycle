@@ -2,7 +2,7 @@
 <SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
     <sharingCriteriaRules>
         <fullName>Directory_Sync_Scope</fullName>
-        <accessLevel>Read</accessLevel>
+        <accessLevel>Edit</accessLevel>
         <accountSettings>
             <caseAccessLevel>None</caseAccessLevel>
             <contactAccessLevel>Edit</contactAccessLevel>
@@ -18,5 +18,6 @@
             <operation>equals</operation>
             <value>True</value>
         </criteriaItems>
+        <includeRecordsOwnedByAll>false</includeRecordsOwnedByAll>
     </sharingCriteriaRules>
 </SharingRules>
