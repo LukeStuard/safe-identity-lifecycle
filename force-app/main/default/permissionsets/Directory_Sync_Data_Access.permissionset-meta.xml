@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
-    <description>Data access for the directory sync integration user: reads in-scope Accounts and Contact lifecycle fields, writes Google sync state, and creates sync log records.</description>
+    <description>Data access for the directory sync integration user: reads in-scope Accounts and Contact lifecycle fields, writes Google sync state, creates sync log records, and publishes sync requests (the reconciliation sweep's repairs).</description>
     <fieldPermissions>
         <editable>false</editable>
         <field>Contact.Email</field>
@@ -126,6 +126,16 @@
         <allowRead>true</allowRead>
         <modifyAllRecords>false</modifyAllRecords>
         <object>Directory_Sync_Log__c</object>
+        <viewAllFields>false</viewAllFields>
+        <viewAllRecords>false</viewAllRecords>
+    </objectPermissions>
+    <objectPermissions>
+        <allowCreate>true</allowCreate>
+        <allowDelete>false</allowDelete>
+        <allowEdit>false</allowEdit>
+        <allowRead>true</allowRead>
+        <modifyAllRecords>false</modifyAllRecords>
+        <object>Directory_Sync_Request__e</object>
         <viewAllFields>false</viewAllFields>
         <viewAllRecords>false</viewAllRecords>
     </objectPermissions>

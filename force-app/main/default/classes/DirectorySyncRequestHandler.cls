@@ -3,6 +3,10 @@
  * (PlatformEventSubscriberConfig). Enqueues one DirectorySyncJob per
  * distinct Contact in the batch. The subscriber batch size is 50, which
  * matches the per-transaction limit on enqueued jobs.
+ *
+ * An event with Kind__c = "Sweep" starts DirectorySyncSweep instead. The
+ * schedule publishes that event, so the sweep's callouts run as the
+ * integration user rather than as whoever scheduled it.
  */
 public inherited sharing class DirectorySyncRequestHandler {
 
@@ -11,7 +15,12 @@ public inherited sharing class DirectorySyncRequestHandler {
             return;
         }
         Set<Id> contactIds = new Set<Id>();
+        Boolean sweep = false;
         for (Directory_Sync_Request__e e : events) {
+            if (e.Kind__c == DirectorySyncSweep.KIND) {
+                sweep = true;
+                continue;
+            }
             Id cid = toContactId(e.Contact_Id__c);
             if (cid != null) {
                 contactIds.add(cid);
@@ -19,6 +28,9 @@ public inherited sharing class DirectorySyncRequestHandler {
         }
         for (Id cid : contactIds) {
             System.enqueueJob(new DirectorySyncJob(cid));
+        }
+        if (sweep) {
+            System.enqueueJob(new DirectorySyncSweep());
         }
     }
 

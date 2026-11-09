@@ -58,6 +58,18 @@ public inherited sharing class GoogleDirectoryClient {
         return send('GET', '/users/' + enc(userKey), null, 'Lookup', false);
     }
 
+    /**
+     * One page of every user in the domain, trimmed to the fields the
+     * reconciliation sweep compares. Pages hold up to 500 users.
+     */
+    public DirectoryResult listUsers(String pageToken) {
+        String path = '/users?domain=' + enc(domain)
+            + '&maxResults=500'
+            + '&fields=' + enc('nextPageToken,users(id,primaryEmail,suspended,orgUnitPath,externalIds)')
+            + (String.isBlank(pageToken) ? '' : '&pageToken=' + enc(pageToken));
+        return send('GET', path, null, 'Sweep', false);
+    }
+
     public DirectoryResult createUser(Map<String, Object> user) {
         return send('POST', '/users', JSON.serialize(user), 'Create', true);
     }
@@ -100,6 +112,16 @@ public inherited sharing class GoogleDirectoryClient {
 
     public static Integer userCount(DirectoryResult r) {
         return listOf(r, 'users').size();
+    }
+
+    /** Every user in a users.list result. */
+    public static List<Object> users(DirectoryResult r) {
+        return listOf(r, 'users');
+    }
+
+    /** The token for the next users.list page, or null on the last page. */
+    public static String nextPageToken(DirectoryResult r) {
+        return r == null || !r.isSuccess() ? null : r.getString('nextPageToken');
     }
 
     /** Group emails from a groups.list result. */

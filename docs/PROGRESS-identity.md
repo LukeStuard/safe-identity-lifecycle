@@ -240,3 +240,14 @@
 - Live test: a Contact with no personal email set to Admitted failed noPersonalEmail, was marked Pending, and the digest delivered to admin@ (SL-000055 flipped to Sent). Test Contact deleted.
 - Enabled Deployment Settings > allow deployments with pending Apex jobs; the hourly schedule otherwise blocks every Apex deploy. Dev-org choice; production would abort and reschedule instead.
 - 98 tests passing.
+## 2026-11-09: Phase 5 reconciliation sweep
+
+- `DirectorySyncSweep` compares every Google user in the domain (users.list, 500 per page, trimmed to id, primaryEmail, suspended, orgUnitPath, externalIds) with the Contacts the integration user can see. One Queueable per page, chained; Developer Edition's chain limit of 5 caps a sweep at 2,500 users, past which it records sweepTruncated and skips the end checks.
+- Repairs go through the normal path: drift (wrong suspended state or OU, or unrecorded Google ID) and neverProvisioned republish a Directory_Sync_Request__e, so the job repairs with its own retries and alerts.
+- Report only, marked Pending for the digest: outOfTree (salesforce_id outside /Demo Students), unmanagedInTree, orphan, missingAccount (never recreated automatically), sweepTruncated, publishFailed.
+- Not checked: group membership (one call per user; the job reconciles groups on every event).
+- Scheduled daily at 8:23 AM via `DirectorySyncSweepSchedule`, which only publishes a sweep request (Kind__c = Sweep); the subscriber starts the sweep as the integration user, since scheduled Apex cannot make callouts and runs as whoever scheduled it.
+- First live run found real drift: Smoke Test was Enrolled in Salesforce but still in /Demo Students/Admitted in Google.
+- Found and fixed: the repair never ran. The integration user had no Create on Directory_Sync_Request__e, and EventBus.publish does not throw, so the failure was silent. Granted Create and Read in Directory Sync Data Access; the sweep now checks every publish result and reports publishFailed. Second run: drift republished, job moved Smoke Test to Enrolled (200); third run quiet.
+- Confirmed the Phase0 Test user and namelimit test users are gone (domain has 3 users).
+- 116 tests passing.

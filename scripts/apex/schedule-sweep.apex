@@ -1,0 +1,1 @@
+System.schedule('Directory Sync Sweep', '0 23 8 * * ?', new DirectorySyncSweepSchedule());

@@ -1,0 +1,1 @@
+System.debug('SWEEP requested ' + DirectorySyncSweep.request());
