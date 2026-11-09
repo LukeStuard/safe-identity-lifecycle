@@ -4,6 +4,7 @@
     <description>What the call did.</description>
     <label>Operation</label>
     <required>false</required>
+    <trackTrending>false</trackTrending>
     <type>Picklist</type>
     <valueSet>
         <restricted>true</restricted>
@@ -68,6 +69,11 @@
                 <fullName>Job Failure</fullName>
                 <default>false</default>
                 <label>Job Failure</label>
+            </value>
+            <value>
+                <fullName>Alert</fullName>
+                <default>false</default>
+                <label>Alert</label>
             </value>
         </valueSetDefinition>
     </valueSet>

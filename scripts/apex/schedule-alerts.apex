@@ -1,0 +1,1 @@
+System.schedule('Directory Sync Alerts', '0 7 * * * ?', new DirectorySyncAlerts());

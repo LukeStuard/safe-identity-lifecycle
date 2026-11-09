@@ -26,6 +26,10 @@
                 <behavior>Edit</behavior>
                 <field>Provisioning_Delay_Minutes__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Alert_Email__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>
@@ -47,6 +51,10 @@
             <layoutItems>
                 <behavior>Edit</behavior>
                 <field>Send_Welcome_Email__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Max_Alert_Emails_Per_Day__c</field>
             </layoutItems>
         </layoutColumns>
         <style>TwoColumnsTopToBottom</style>

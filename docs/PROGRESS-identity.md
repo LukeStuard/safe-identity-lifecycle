@@ -218,4 +218,14 @@
 - DirectoryResult.isRetryableReason classifies a stored reason, including the "http" + status form. Added internalError, RESOURCE_EXHAUSTED and UNAVAILABLE as retryable.
 - The finalizer does not retry: an exception that escapes the job is a bug or a governor limit. Its rows now carry the attempt.
 - Apex tests cannot chain Queueables, so the job skips the enqueue under Test.isRunningTest(); tests assert the decision through the plan log and the Contact. 85 tests passing.
-- Known gap: a create that times out after Google accepted it is adopted on retry, so no welcome email is sent; that student needs the reprovision action (Phase 5 step 5).
+- Known gap: a create that times out after Google accepted it is adopted on retry, so no welcome email is sent; that student needs the reprovision action (Phase 5 step 5).## 2026-11-09: Phase 5 failure alerts
+
+- Hourly digest (`DirectorySyncAlerts`, scheduled at :07, runs as luke) emails admin@ from the org-wide address, listing every log row with Alert_Status__c = Pending, with a link to each Contact. Reported rows become Sent; each digest writes an Alert log row.
+- Pending means a final failure: not retryable, or out of attempts; a failed welcome email; or a finalizer Job Failure. Retries in flight never alert.
+- Budget: Developer Edition allows 15 single emails a day, shared with welcome emails. At most Max_Alert_Emails_Per_Day__c (3) successful digests in any rolling 24 hours; past the cap, rows wait. A failed send keeps its rows Pending and does not count toward the cap. `reserveSingleEmailCapacity` runs before every send.
+- Used an Alert_Status__c picklist (blank, Pending, Sent) instead of an Alerted checkbox, so "never needed an alert" is distinct from "not yet sent".
+- A failed run's Plan row now records Success false and the failure reason (previously a failed CREATE showed Success true).
+- New settings: Alert_Email__c (admin@shuraku.org; blank turns alerts off), Max_Alert_Emails_Per_Day__c (3). Added `Alert` to the Operation picklist.
+- Live test: a Contact with no personal email set to Admitted failed noPersonalEmail, was marked Pending, and the digest delivered to admin@.
+- 98 tests passing.
+“Enabled Deployment Settings > allow deployments with pending Apex jobs; the hourly schedule otherwise blocks every Apex deploy. Dev-org choice; production would abort and reschedule instead

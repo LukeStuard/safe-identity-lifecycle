@@ -1,0 +1,1 @@
+System.debug('ALERTS ' + DirectorySyncAlerts.run(DirectorySyncConfig.settings()));

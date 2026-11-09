@@ -25,6 +25,10 @@
  * Contact edit enqueues a fresh job while a retry is pending, both converge
  * for the same reason (lookup first, adopt on 409, 409 and 404 on groups
  * count as success).
+ *
+ * Alerts: a final failure (not retryable, or out of attempts) and a failed
+ * welcome email mark their log row Alert_Status__c = Pending. The hourly
+ * DirectorySyncAlerts digest reports them; retries in flight never alert.
  */
 public with sharing class DirectorySyncJob implements Queueable, Database.AllowsCallouts {
 
@@ -101,6 +105,7 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                 patch = outcome.toContact(contactId);
                 if (!outcome.success) {
                     noteFailure(outcome.errorReason, DirectoryResult.isRetryableReason(outcome.errorReason));
+                    plan.steps.add('Failed: ' + outcome.errorReason + (String.isBlank(outcome.errorMessage) ? '' : ' (' + outcome.errorMessage + ')'));
                 }
 
                 if (outcome.success && syncGroups) {
@@ -122,8 +127,10 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                         c.FirstName, outcome.primaryEmail, outcome.password, c.Email, settings.Org_Wide_Address_Id__c
                     );
                     String emailError = WelcomeEmail.send(message, forceEmailFailure);
-                    extraLogs.add(WelcomeEmail.log(contactId, c.Email, outcome.primaryEmail, emailError));
+                    Directory_Sync_Log__c welcomeLog = WelcomeEmail.log(contactId, c.Email, outcome.primaryEmail, emailError);
+                    extraLogs.add(welcomeLog);
                     if (emailError != null) {
+                        welcomeLog.Alert_Status__c = 'Pending';
                         patch.Google_Account_Status__c = 'Error';
                         patch.Google_Last_Error__c = ('Welcome email failed; password reset required. ' + emailError).left(255);
                     }
@@ -191,7 +198,16 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         Integer retryDelay = applyRetryPolicy(patch, plan);
 
         List<Directory_Sync_Log__c> logs = new List<Directory_Sync_Log__c>(client.getPendingLogs());
-        logs.add(plan.toLog(contactId, c.Lifecycle_Status__c, mapping, dryRun));
+        Directory_Sync_Log__c planLog = plan.toLog(contactId, c.Lifecycle_Status__c, mapping, dryRun);
+        if (failureRetryable != null) {
+            // The run failed: the plan row says so, and a final failure waits for the digest.
+            planLog.Success__c = false;
+            planLog.Error_Reason__c = failureReason;
+            if (retryDelay == null) {
+                planLog.Alert_Status__c = 'Pending';
+            }
+        }
+        logs.add(planLog);
         logs.addAll(extraLogs);
         for (Directory_Sync_Log__c l : logs) {
             l.Attempt__c = attempt;

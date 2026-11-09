@@ -9,6 +9,7 @@
  * Unhandled exceptions are not retried. Transient Google errors are handled
  * inside the job and retried there; an exception that escapes the job is a
  * bug or a governor limit, and running it again would fail the same way.
+ * The row is marked for the admin alert digest.
  */
 public with sharing class DirectorySyncFinalizer implements Finalizer {
 
@@ -46,6 +47,7 @@ public with sharing class DirectorySyncFinalizer implements Finalizer {
             Success__c = false,
             Error_Reason__c = 'unhandledException',
             Attempt__c = attempt,
+            Alert_Status__c = 'Pending',
             Request_Summary__c = 'DirectorySyncJob for ' + contactId,
             Response_Summary__c = detail.left(32000)
         );

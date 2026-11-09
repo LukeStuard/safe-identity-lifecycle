@@ -52,6 +52,11 @@
     </fieldPermissions>
     <fieldPermissions>
         <editable>false</editable>
+        <field>Directory_Sync_Log__c.Alert_Status__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
         <field>Directory_Sync_Log__c.Attempt__c</field>
         <readable>true</readable>
     </fieldPermissions>
