@@ -229,3 +229,14 @@
 - Live test: a Contact with no personal email set to Admitted failed noPersonalEmail, was marked Pending, and the digest delivered to admin@.
 - 98 tests passing.
 “Enabled Deployment Settings > allow deployments with pending Apex jobs; the hourly schedule otherwise blocks every Apex deploy. Dev-org choice; production would abort and reschedule instead
+## 2026-11-09: Phase 5 failure alerts
+
+- Hourly digest (`DirectorySyncAlerts`, scheduled at :07, runs as luke) emails admin@ from the org-wide address, listing every log row with Alert_Status__c = Pending, with a link to each Contact. Reported rows become Sent; each digest writes an Alert log row.
+- Pending means a final failure: not retryable, or out of attempts; a failed welcome email; or a finalizer Job Failure. Retries in flight never alert.
+- Budget: Developer Edition allows 15 single emails a day, shared with welcome emails. At most Max_Alert_Emails_Per_Day__c (3) successful digests in any rolling 24 hours; past the cap, rows wait. A failed send keeps its rows Pending and does not count toward the cap. `reserveSingleEmailCapacity` runs before every send.
+- Used an Alert_Status__c picklist (blank, Pending, Sent) instead of an Alerted checkbox, so "never needed an alert" is distinct from "not yet sent".
+- A failed run's Plan row now records Success false and the failure reason (previously a failed CREATE showed Success true). A failed create also adds a Failed step to the plan, so the digest shows the error message, not just the reason.
+- New settings: Alert_Email__c (admin@shuraku.org; blank turns alerts off), Max_Alert_Emails_Per_Day__c (3). Added `Alert` to the Operation picklist.
+- Live test: a Contact with no personal email set to Admitted failed noPersonalEmail, was marked Pending, and the digest delivered to admin@ (SL-000055 flipped to Sent). Test Contact deleted.
+- Enabled Deployment Settings > allow deployments with pending Apex jobs; the hourly schedule otherwise blocks every Apex deploy. Dev-org choice; production would abort and reschedule instead.
+- 98 tests passing.
