@@ -27,6 +27,18 @@ private class WelcomeEmailTest {
     }
 
     @IsTest
+    static void renameNoticeHasBothUsernamesAndNoPassword() {
+        Messaging.SingleEmailMessage m = WelcomeEmail.buildRename('José', 'jose.garcia-lopez@shuraku.org', 'josegarcia.lopez@shuraku.org', 'jose@example.com', null);
+        Assert.areEqual('Your Shuraku University Student Account: New Username', m.getSubject());
+        String body = m.getPlainTextBody();
+        Assert.isTrue(body.startsWith('Hi José,'), body);
+        Assert.isTrue(body.contains('New username: jose.garcia-lopez@shuraku.org'), body);
+        Assert.isTrue(body.contains('Previous username: josegarcia.lopez@shuraku.org'), body);
+        Assert.isFalse(body.contains('Temporary password'), 'Rename never sends a password');
+        Assert.isFalse(body.contains('—'), 'No em-dashes');
+    }
+
+    @IsTest
     static void blankFirstNameGetsPlainGreeting() {
         Assert.isTrue(WelcomeEmail.body('  ', 'u@shuraku.org', 'p').startsWith('Hi,'));
     }

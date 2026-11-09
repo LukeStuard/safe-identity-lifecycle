@@ -9,6 +9,7 @@ public inherited sharing class WelcomeEmail {
 
     public static final String SUBJECT = 'Your Shuraku University Student Account';
     public static final String RESET_SUBJECT = 'Your Shuraku University Student Account: New Temporary Password';
+    public static final String RENAME_SUBJECT = 'Your Shuraku University Student Account: New Username';
     public static final String SIGN_IN_URL = 'https://accounts.google.com';
 
     public static Messaging.SingleEmailMessage build(
@@ -30,6 +31,31 @@ public inherited sharing class WelcomeEmail {
         String orgWideAddressId
     ) {
         return message(RESET_SUBJECT, body(firstName, username, password, true), toAddress, orgWideAddressId);
+    }
+
+    /** Sent by the rename action. No password: it does not change. */
+    public static Messaging.SingleEmailMessage buildRename(
+        String firstName,
+        String newUsername,
+        String oldUsername,
+        String toAddress,
+        String orgWideAddressId
+    ) {
+        String greeting = String.isBlank(firstName) ? 'Hi,' : 'Hi ' + firstName.trim() + ',';
+        String text = String.join(new List<String>{
+            greeting,
+            '',
+            'Your student account username has changed to match your name.',
+            '',
+            'New username: ' + newUsername,
+            'Previous username: ' + oldUsername,
+            'Sign in at: ' + SIGN_IN_URL,
+            '',
+            'Your password has not changed. Use the new username the next time you sign in; the previous one no longer works for sign-in. The change can take up to 10 minutes to reach every Google service.',
+            '',
+            'If you didn\'t expect this message, please contact the school.'
+        }, '\n');
+        return message(RENAME_SUBJECT, text, toAddress, orgWideAddressId);
     }
 
     private static Messaging.SingleEmailMessage message(String subject, String text, String toAddress, String orgWideAddressId) {

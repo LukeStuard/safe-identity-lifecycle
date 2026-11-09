@@ -9,7 +9,8 @@
  * integration user rather than as whoever scheduled it.
  *
  * An event with Kind__c = "Reprovision" starts a password reprovision job
- * for its Contact (see DirectorySyncReprovision).
+ * for its Contact (see DirectorySyncReprovision); "Rename" starts a
+ * username rename (see DirectorySyncRename).
  */
 public inherited sharing class DirectorySyncRequestHandler {
 
@@ -19,10 +20,18 @@ public inherited sharing class DirectorySyncRequestHandler {
         }
         Set<Id> contactIds = new Set<Id>();
         Set<Id> reprovisionIds = new Set<Id>();
+        Set<Id> renameIds = new Set<Id>();
         Boolean sweep = false;
         for (Directory_Sync_Request__e e : events) {
             if (e.Kind__c == DirectorySyncSweep.KIND) {
                 sweep = true;
+                continue;
+            }
+            if (e.Kind__c == DirectorySyncRename.KIND) {
+                Id nid = toContactId(e.Contact_Id__c);
+                if (nid != null) {
+                    renameIds.add(nid);
+                }
                 continue;
             }
             if (e.Kind__c == DirectorySyncReprovision.KIND) {
@@ -42,6 +51,9 @@ public inherited sharing class DirectorySyncRequestHandler {
         }
         for (Id rid : reprovisionIds) {
             System.enqueueJob(DirectorySyncJob.forReprovision(rid));
+        }
+        for (Id nid : renameIds) {
+            System.enqueueJob(DirectorySyncJob.forRename(nid));
         }
         if (sweep) {
             System.enqueueJob(new DirectorySyncSweep());

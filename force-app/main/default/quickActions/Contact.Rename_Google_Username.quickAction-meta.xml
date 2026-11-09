@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Changes the student's Google username to match their current name and emails them the new sign-in address.</description>
+    <flowDefinition>Rename_Google_Username</flowDefinition>
+    <label>Rename Google Username</label>
+    <optionsCreateFeedItem>false</optionsCreateFeedItem>
+    <type>Flow</type>
+</QuickAction>

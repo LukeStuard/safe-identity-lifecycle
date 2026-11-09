@@ -36,6 +36,13 @@
  * the Contact has no personal email, or dry run is on. Not retried: a person
  * asked for it and can ask again after the cooldown, and a retry could send
  * a second password.
+ *
+ * Names: on every run against an existing account, the display name
+ * (givenName, familyName) follows the Contact. The username does not; it
+ * changes only in rename mode (forRename), which a person requests. Rename
+ * tries the base username and then the collision suffixes, refuses when the
+ * name is one of the account's own aliases (a previous name), and emails the
+ * new username. Not retried, for the same reason as reprovision.
  */
 public with sharing class DirectorySyncJob implements Queueable, Database.AllowsCallouts {
 
@@ -45,6 +52,7 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
     private final Id contactId;
     private final Integer attempt;
     private Boolean reprovision = false;
+    private Boolean rename = false;
 
     /** First failure seen in this run; decides whether to retry. */
     private transient String failureReason;
@@ -65,6 +73,13 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
     public DirectorySyncJob(Id contactId, Integer attempt) {
         this.contactId = contactId;
         this.attempt = attempt == null || attempt < 1 ? 1 : attempt;
+    }
+
+    /** A job that renames the username instead of syncing the account. */
+    public static DirectorySyncJob forRename(Id contactId) {
+        DirectorySyncJob job = new DirectorySyncJob(contactId, 1);
+        job.rename = true;
+        return job;
     }
 
     /** A job that reprovisions the account instead of syncing it. */
@@ -99,6 +114,10 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         Directory_Sync_Setting__mdt settings = injectedSettings != null ? injectedSettings : DirectorySyncConfig.settings();
         if (reprovision == true) {
             runReprovision(c, settings);
+            return;
+        }
+        if (rename == true) {
+            runRename(c, settings);
             return;
         }
         Boolean dryRun = settings.Dry_Run__c == true;
@@ -200,6 +219,10 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                         }
                     }
 
+                    if (stateOk == true) {
+                        syncDisplayName(googleId, user, c, client, result);
+                    }
+
                     if (patch == null) {
                         patch = new Contact(Id = contactId);
                     }
@@ -241,6 +264,157 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         if (retryDelay != null) {
             enqueueRetry(retryDelay);
         }
+    }
+
+    /** The name Google should show for this Contact, built the same way as at create. */
+    @TestVisible
+    private static Map<String, Object> desiredName(Contact c) {
+        return new Map<String, Object>{
+            'givenName' => UsernameNormalizer.displayName(c.FirstName, c.LastName),
+            'familyName' => UsernameNormalizer.displayName(c.LastName, c.FirstName)
+        };
+    }
+
+    /** Updates givenName and familyName when they differ. Skipped when the lookup carried no name. */
+    private static void syncDisplayName(
+        String googleId,
+        Map<String, Object> user,
+        Contact c,
+        GoogleDirectoryClient client,
+        DirectoryMover.Result result
+    ) {
+        if (!(user.get('name') instanceof Map<String, Object>)) {
+            return;
+        }
+        Map<String, Object> current = (Map<String, Object>) user.get('name');
+        Map<String, Object> wanted = desiredName(c);
+        if (current.get('givenName') == wanted.get('givenName') && current.get('familyName') == wanted.get('familyName')) {
+            return;
+        }
+        DirectoryResult r = client.updateUser(googleId, new Map<String, Object>{ 'name' => wanted }, 'Update');
+        if (r.isSuccess()) {
+            result.notes.add('Display name updated to ' + wanted.get('givenName') + ' ' + wanted.get('familyName') + '.');
+        } else {
+            result.fail(r);
+        }
+    }
+
+    /** Rename: new username from the Contact's name. Callouts first, then email, then DML. */
+    private void runRename(Contact c, Directory_Sync_Setting__mdt settings) {
+        Boolean dryRun = settings.Dry_Run__c == true;
+        GoogleDirectoryClient client = new GoogleDirectoryClient(contactId, settings.Domain__c, dryRun);
+        List<String> steps = new List<String>();
+        String reason;
+        String detail;
+        String oldEmail;
+        String newEmail;
+        Boolean nothingToDo = false;
+
+        if (dryRun) {
+            reason = 'dryRun';
+            detail = 'Dry run is on; the username was not changed.';
+        } else if (String.isBlank(c.Email)) {
+            reason = 'noPersonalEmail';
+            detail = 'The Contact has no personal email to send the new username to.';
+        } else {
+            DirectoryResult lookup = client.findByExternalId(contactId);
+            Map<String, Object> user = singleUser(lookup);
+            if (!lookup.isSuccess()) {
+                reason = lookup.errorReason != null ? lookup.errorReason : 'http' + lookup.statusCode;
+                detail = 'Google lookup failed.';
+            } else if (GoogleDirectoryClient.userCount(lookup) > 1) {
+                reason = 'multipleMatches';
+                detail = 'More than one Google user carries this Salesforce ID; resolve by hand.';
+            } else if (user == null) {
+                reason = 'noAccount';
+                detail = 'No Google account carries this Contact\'s salesforce_id.';
+            } else if (user.get('suspended') == true) {
+                reason = 'suspendedAccount';
+                detail = 'The account is suspended. Change the Lifecycle Status to reactivate it first.';
+            } else {
+                String googleId = (String) user.get('id');
+                oldEmail = (String) user.get('primaryEmail');
+                String base = UsernameNormalizer.baseLocalPart(c.FirstName, c.LastName, c.Id);
+                if (DirectorySyncRename.matchesBase(oldEmail, base)) {
+                    nothingToDo = true;
+                    steps.add('Username ' + oldEmail + ' already matches the name; nothing renamed.');
+                } else {
+                    for (Integer attempt = 1; attempt <= DirectoryJoiner.MAX_ATTEMPTS; attempt++) {
+                        String candidate = UsernameNormalizer.email(UsernameNormalizer.localPart(base, attempt), settings.Domain__c);
+                        DirectoryResult r = client.updateUser(
+                            googleId,
+                            new Map<String, Object>{ 'primaryEmail' => candidate, 'name' => desiredName(c) },
+                            'Rename'
+                        );
+                        if (r.isSuccess()) {
+                            String returned = r.getString('primaryEmail');
+                            newEmail = String.isBlank(returned) ? candidate : returned;
+                            steps.add('Done: renamed ' + oldEmail + ' to ' + newEmail + '; the old address became an alias.');
+                            break;
+                        }
+                        if (!r.isConflict()) {
+                            reason = r.errorReason != null ? r.errorReason : 'http' + r.statusCode;
+                            detail = 'Rename failed' + (String.isBlank(r.errorMessage) ? '.' : ': ' + r.errorMessage);
+                            break;
+                        }
+                        DirectoryResult holder = client.getUser(candidate);
+                        if (holder.isSuccess() && holder.getString('id') == googleId) {
+                            reason = 'ownAlias';
+                            detail = candidate + ' is already an alias of this account (a previous name). Remove that alias in the Admin console, then rename again.';
+                            break;
+                        }
+                        steps.add(candidate + ' is taken; trying the next suffix.');
+                    }
+                    if (reason == null && newEmail == null) {
+                        reason = 'usernameExhausted';
+                        detail = 'No free username after ' + DirectoryJoiner.MAX_ATTEMPTS + ' attempts starting at ' + base + '.';
+                    }
+                }
+            }
+        }
+
+        // All callouts are done. The email goes out before any DML.
+        Contact patch = new Contact(Id = contactId, Google_Last_Sync__c = System.now());
+        List<Directory_Sync_Log__c> extraLogs = new List<Directory_Sync_Log__c>();
+        if (reason == null && newEmail != null) {
+            patch.Google_Primary_Email__c = newEmail;
+            patch.Google_Last_Error__c = null;
+            Messaging.SingleEmailMessage message = WelcomeEmail.buildRename(
+                c.FirstName, newEmail, oldEmail, c.Email, settings.Org_Wide_Address_Id__c
+            );
+            String emailError = WelcomeEmail.send(message, forceEmailFailure);
+            Directory_Sync_Log__c notice = WelcomeEmail.log(contactId, c.Email, newEmail, emailError);
+            extraLogs.add(notice);
+            if (emailError == null) {
+                steps.add('Done: new username emailed to ' + c.Email + '.');
+            } else {
+                notice.Alert_Status__c = 'Pending';
+                reason = 'emailFailed';
+                detail = 'The username was changed, but the email failed: ' + emailError;
+                patch.Google_Last_Error__c = ('Rename email failed; tell the student their new username is ' + newEmail + '. ' + emailError).left(255);
+            }
+        } else if (reason != null) {
+            patch.Google_Last_Error__c = ('Rename refused (' + reason + '): ' + detail).left(255);
+        }
+
+        List<Directory_Sync_Log__c> logs = new List<Directory_Sync_Log__c>(client.getPendingLogs());
+        logs.add(new Directory_Sync_Log__c(
+            Contact__c = contactId,
+            Operation__c = 'Plan',
+            Success__c = reason == null,
+            Dry_Run__c = dryRun,
+            Error_Reason__c = reason,
+            Alert_Status__c = reason != null && reason != 'emailFailed' ? 'Pending' : null,
+            Request_Summary__c = 'Rename for status "' + c.Lifecycle_Status__c + '"',
+            Response_Summary__c = (reason == null ? (nothingToDo ? 'RENAME: nothing to do' : 'RENAME') : 'RENAME REFUSED: ' + detail)
+                + (steps.isEmpty() ? '' : '\n- ' + String.join(steps, '\n- '))
+        ));
+        logs.addAll(extraLogs);
+        for (Directory_Sync_Log__c l : logs) {
+            l.Attempt__c = attempt;
+        }
+        update patch;
+        insert logs;
     }
 
     /** Reprovision: new temporary password plus a reset email. Callouts first, then email, then DML. */

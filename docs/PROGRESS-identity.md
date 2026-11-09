@@ -258,3 +258,11 @@
 - `DirectoryJoiner.generatePassword` is now public and shared by both paths. Added `Password Reset` to the Operation picklist.
 - Live on Smoke Test: request logged as luke; integration user looked up, reset the password, and emailed it; a second click within 10 minutes was refused; signed in as smoke.test@shuraku.org with the temporary password and was required to set a new one. Smoke Test's unknown-password loose end is closed.
 - 129 tests passing.
+## 2026-11-09: Phase 5 name changes (open question 1 decided)
+
+- Decided: hybrid. Display names follow the Contact automatically; the username changes only through a deliberate action, because a rename breaks the old sign-in (Google keeps the old address as an alias; renames can take up to 10 minutes to propagate).
+- Display name sync: on every run against an existing account, the job compares Google's givenName and familyName with the Contact (built with UsernameNormalizer.displayName, as at create) and sends one name-only Update when they differ. Never touches primaryEmail.
+- Rename Google Username quick action (screen flow `Rename_Google_Username`): preview shows the current and proposed username; nothing to rename ends without sending anything. `DirectorySyncRename` checks the `Directory_Sync_Rename` custom permission, an active account, a personal email, and a 10-minute cooldown, then publishes Kind__c = Rename and logs who asked.
+- Rename job (integration user): tries the base username, then collision suffixes; refuses ownAlias when the name is already an alias of the same account (renaming back to a previous name) instead of handing out a suffix; updates Google_Primary_Email__c and emails a New Username notice (no password). Not retried. Added `Rename` to the Operation picklist.
+- Live on José García López: corrected the split to "José" / "García López"; the job updated only the display name. Rename moved josegarcia.lopez@shuraku.org to jose.garcia-lopez@shuraku.org, the notice arrived, and sign-in worked with the new username and unchanged password.
+- 144 tests passing. Phase 5 complete.

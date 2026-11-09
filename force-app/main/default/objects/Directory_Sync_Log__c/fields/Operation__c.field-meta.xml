@@ -80,6 +80,11 @@
                 <default>false</default>
                 <label>Password Reset</label>
             </value>
+            <value>
+                <fullName>Rename</fullName>
+                <default>false</default>
+                <label>Rename</label>
+            </value>
         </valueSetDefinition>
     </valueSet>
 </CustomField>
