@@ -1,18 +1,27 @@
 /**
  * Routed HttpCalloutMock for the Directory API.
- * Routes are keyed by method and path (query string ignored). Any request
- * with no matching route throws UnexpectedCalloutException, which the client
- * does not catch, so an unplanned callout fails the test loudly.
- * Every request is recorded for assertions on what was actually sent.
+ *
+ * - Routes are keyed by method and path (query string ignored).
+ * - Routing the same key more than once queues responses: each call takes
+ *   the next one, and the last is reused once the queue is down to one.
+ * - A path ending in '*' matches by prefix, e.g. route('GET', '/users/*', ...).
+ *   Exact routes win over prefix routes.
+ * - Any request with no matching route throws UnexpectedCalloutException,
+ *   which the client does not catch, so an unplanned callout fails the test.
+ * - Every request is recorded for assertions on what was actually sent.
  */
 @IsTest
 public class DirectoryMock implements HttpCalloutMock {
 
-    private final Map<String, List<Object>> routes = new Map<String, List<Object>>();
+    private final Map<String, List<List<Object>>> routes = new Map<String, List<List<Object>>>();
     public final List<HttpRequest> requests = new List<HttpRequest>();
 
     public DirectoryMock route(String method, String path, Integer status, String body) {
-        routes.put(method + ' ' + path, new List<Object>{ status, body });
+        String key = method + ' ' + path;
+        if (!routes.containsKey(key)) {
+            routes.put(key, new List<List<Object>>());
+        }
+        routes.get(key).add(new List<Object>{ status, body });
         return this;
     }
 
@@ -20,15 +29,24 @@ public class DirectoryMock implements HttpCalloutMock {
         requests.add(req);
         String path = req.getEndpoint().substringAfter('/admin/directory/v1').substringBefore('?');
         String key = req.getMethod() + ' ' + path;
-        List<Object> route = routes.get(key);
-        if (route == null) {
+        List<List<Object>> queue = routes.get(key);
+        if (queue == null) {
+            for (String candidate : routes.keySet()) {
+                if (candidate.endsWith('*') && key.startsWith(candidate.removeEnd('*'))) {
+                    queue = routes.get(candidate);
+                    break;
+                }
+            }
+        }
+        if (queue == null || queue.isEmpty()) {
             throw new UnexpectedCalloutException('DirectoryMock has no route for ' + key);
         }
+        List<Object> next = queue.size() > 1 ? queue.remove(0) : queue[0];
         HttpResponse res = new HttpResponse();
-        res.setStatusCode((Integer) route[0]);
-        if (route[1] != null) {
+        res.setStatusCode((Integer) next[0]);
+        if (next[1] != null) {
             res.setHeader('Content-Type', 'application/json');
-            res.setBody((String) route[1]);
+            res.setBody((String) next[1]);
         }
         return res;
     }

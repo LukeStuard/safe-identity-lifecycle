@@ -173,3 +173,33 @@
 - **License-scoped grants:** Read on User External Credentials in `Google Directory Sync` (a standard permission set) did not take effect for the Integration-licensed user. The callout failed with "You don't have read permissions on the User External Credential object" until the grant was added to `Directory_Sync_Data_Access` (Salesforce API Integration license). Phase 1 Check 1 was a false pass: the assignment saved, but not every grant applied.
 - Result: Contact edit, event, subscriber, and job all ran as Integration Directory Sync; Lookup returned 200 and the Plan logged CREATE, linked to the Contact.
 - Removed `Google Directory Sync` from luke's own user. Only the integration user can call Google.
+- **Finding:** Custom Metadata Types deployed from source get a page layout without their custom fields, so the Default record's edit page in Setup showed none of the settings. Added the fields to the layouts by hand (Setup > Custom Metadata Types > [type] > Page Layouts) for `Directory_Sync_Setting__mdt` and `Directory_Status_Mapping__mdt`, then retrieved both layouts into source so the next deploy carries them.
+- **Finding:** with Contact set to Controlled by Parent, an Account sharing rule has no separate Contact access; Contacts inherit the Account access level. The rule's `contactAccessLevel` (Edit) was ignored, so the integration user got Read on Contacts and the first live create failed at the Contact write-back (INSUFFICIENT_ACCESS_OR_READONLY) after Google had already created the account. Fixed by setting the rule's Account access to Read/Write; the integration user's permission set still allows only Read on the Account object, so it cannot edit Accounts. Google-side work is not rolled back by a Salesforce failure, which is why the job looks up by Salesforce ID before any create.
+## 2026-11-06: Phase 2 joiner path
+
+- Normalizer: `UsernameNormalizer` builds first.last usernames (nicknames dropped, accents transliterated, apostrophes dropped, last-name spaces to hyphens, capped at 62 so a collision suffix fits in 64) and Unicode display names capped at 40. 20 name fixtures plus edge cases.
+- Joiner: `DirectoryJoiner` creates the account with a 20-character random password held only in memory, `changePasswordAtNextLogin`, the status's OU, and the `salesforce_id` external ID. On a 409, it fetches the holder of the name; if the holder carries this Contact's ID, the account is linked instead of duplicated, otherwise the next suffix is tried (up to 10).
+- `WelcomeEmail` sends "Your Shuraku University Student Account" from the org-wide address after all callouts and before any DML; not saved as an activity; the password never appears in a log.
+- Job order: callouts, then email, then Contact write-back and logs. If the job finds a Google account by Salesforce ID that the Contact does not record, it links it.
+- 61 tests passing. Tests inject settings through job instance fields rather than static variables.
+- **Live:** a clean create for a Contact entered as First Name "José García", Last Name "López" produced `josegarcia.lopez@shuraku.org` in `/Demo Students/Admitted` and delivered the welcome email. The username follows the field split as entered (spaces removed in first names, hyphenated in last names), so name quality in the source system determines username quality.
+- Custom Metadata Type layouts deployed from source lack their custom fields; added by hand and retrieved.
+- Created the Shuraku University Lightning app (Contacts, Directory Sync Logs, Accounts, Reports), assigned through Directory Sync Admin rather than profiles.
+- Moved development to a second machine (macOS): clone, no-reply commit identity, org login, retrieve of classes that had been deployed but not committed.
+- **Finding:** deploying all of `force-app` overwrote the Default settings record, turning Dry Run back on after it had been switched off in Setup. The repo copy now matches the org (Dry Run off). Custom Metadata records are deployed like code, so the repo is the source of truth for settings; change them in source, not only in Setup.
+## 2026-11-06: Phase 3 mover path
+
+- Decided: flat program and term groups. `Directory_Group_Mapping__mdt` keys on Program and Term with blanks as wildcards, so a cohort group (both keys) can be added later as a record, not code. Six groups created by hand.
+- `DirectoryGroupPlanner` computes desired and managed groups; `DirectoryMover` moves the OU, reads memberships, adds what is missing, and removes managed groups that no longer apply. Unmanaged groups are never touched. 409 on add and 404 on remove count as success. New accounts get groups without a membership read.
+- Phases 3 and 4 kept separate: suspend and reactivate remain plan-only.
+- 73 tests passing. Flow tests now pass with Dry Run on or off.
+- CMDT layouts deployed from source must include `NamespacePrefix`.
+- Live on José García López: groups added (MS Analytics, Fall 2026); status to Enrolled moved the OU with groups unchanged; Program to MBA added MBA and removed MS Analytics, leaving Fall 2026.
+- Directory Sync Logs related list sorted by Log Number with Created Date shown; rows from one job share a timestamp to the second, so date sorting scrambled them.
+## 2026-11-06: Phase 4 leaver and return
+
+- Leaver (Withdrawn, Denied, Cancelled): one users.patch suspends and moves to `/Demo Students/Inactive`, then all managed groups are removed. Sign-in is cut before groups are touched; a failed suspend leaves groups alone and records the error.
+- Return (any Active status on a suspended account): one users.patch reactivates and moves to the status's OU, then groups are restored from the Contact's Program and Term. Stripping groups on suspend costs nothing because membership is derived from the Contact.
+- Contact status is written as Suspended or Active only when the account change succeeded.
+- 78 tests passing.
+- Live on José García López: Withdrawn suspended and moved him with both groups removed; Enrolled reactivated and moved him with both groups restored.

@@ -3,7 +3,7 @@
     <label>Default</label>
     <protected>false</protected>
     <values><field>Enabled__c</field><value xsi:type="xsd:boolean">true</value></values>
-    <values><field>Dry_Run__c</field><value xsi:type="xsd:boolean">true</value></values>
+    <values><field>Dry_Run__c</field><value xsi:type="xsd:boolean">false</value></values>
     <values><field>Send_Welcome_Email__c</field><value xsi:type="xsd:boolean">true</value></values>
     <values><field>Provisioning_Delay_Minutes__c</field><value xsi:type="xsd:double">0</value></values>
     <values><field>Domain__c</field><value xsi:type="xsd:string">shuraku.org</value></values>
