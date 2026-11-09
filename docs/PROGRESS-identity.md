@@ -266,3 +266,7 @@
 - Rename job (integration user): tries the base username, then collision suffixes; refuses ownAlias when the name is already an alias of the same account (renaming back to a previous name) instead of handing out a suffix; updates Google_Primary_Email__c and emails a New Username notice (no password). Not retried. Added `Rename` to the Operation picklist.
 - Live on José García López: corrected the split to "José" / "García López"; the job updated only the display name. Rename moved josegarcia.lopez@shuraku.org to jose.garcia-lopez@shuraku.org, the notice arrived, and sign-in worked with the new username and unchanged password.
 - 144 tests passing. Phase 5 complete.
+## 2026-11-09: Phase 6 evidence and an access correction
+
+- 16 redacted screenshots in docs/evidence/, captioned in the README Evidence section.
+- Found while capturing evidence: luke@ still held Organization Policy Administrator at the org, though the brief recorded it as removed after the key-upload exception. Removed it; luke@ now holds Organization Administrator only. (Removing access in the console strips every role on the principal, so Organization Administrator had to be re-granted; the basic Admin role, formerly Owner, was briefly assigned by mistake and replaced.) Sweep re-run afterward to confirm the Google callouts still authenticate.

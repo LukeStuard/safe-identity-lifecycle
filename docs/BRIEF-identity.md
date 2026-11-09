@@ -11,7 +11,7 @@ Status: Phases 0 through 5 complete (lifecycle paths, retries, alerts, reconcili
 
 ## 1. Goal
 
-Rebuild my CIAM Office 365 provisioning sync against Google Cloud Identity, and fix the original's known failures by design rather than by patch.
+Rebuild my Office 365 provisioning sync against Google Cloud Identity, and fix the original's known failures by design rather than by patch.
 
 The project serves two career tracks:
 
@@ -22,9 +22,9 @@ Possible follow-ups on the same tenant: an SSO hub (SAML into Salesforce and my 
 
 ## 2. The original and its lessons
 
-The CIAM original provisions Microsoft 365 accounts from Salesforce:
+The original provisions Microsoft 365 accounts from Salesforce:
 
-- `CIAM_CallGraphAPI` Apex class making Microsoft Graph callouts
+- 'CallGraphAPI` Apex class making Microsoft Graph callouts
 - Chained queueables for the async work
 - A "Provision O365 User" flow as the entry point
 - Name normalization to build `mailNickname`
@@ -304,7 +304,7 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 - Free tier throughout. The one paid exception is the shuraku.org domain (about $11/yr).
 - Do not enable anything that bills by usage. No Cloudflare Workers Paid. The Google Cloud project has no billing account attached. Back out of any screen asking for a card or offering a trial.
 - Keep Google's security baseline. Any exception is scoped as narrowly as possible and documented with its reason.
-- Demo data only. No CIAM data, names, or configuration in this repo.
+- Demo data only. No non project data, names, or configuration in this repo.
 - Secrets never committed. The private key lives only in Salesforce. No service account key files exist.
 - Public-repo hygiene: raw screenshots go in `evidence-raw/` (gitignored). Only redacted copies go in `docs/evidence/`. Keep customer ID, key ID, user IDs, and recovery contact details out of committed files.
 - Check the docs for the version actually in use before writing library or API code.
