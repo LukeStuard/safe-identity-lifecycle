@@ -1,91 +1,123 @@
 # Safe Identity Lifecycle
 
-Salesforce as the system of record for identity: student records drive Google account creation, OU placement, group membership, suspension, and reactivation through the Google Admin SDK Directory API.
+Salesforce as the system of record for identity. Student records in Salesforce drive the whole Google account lifecycle (create, OU placement, group membership, suspend, reactivate, password reprovision, and rename) through the Google Admin SDK Directory API, with least-privilege access at every layer and every call logged.
 
-> **Status: Phase 0 complete.** The tenant, least-privilege service account, and Salesforce authentication are in place, and live API calls have proven create, lookup by Salesforce ID, suspend, and group membership. The integration code starts in Phase 1. Progress is logged in [`docs/PROGRESS-identity.md`](docs/PROGRESS-identity.md), and the plan is in [`docs/BRIEF-identity.md`](docs/BRIEF-identity.md).
+> **Status: built and proven live.** Joiner, mover, leaver, and return paths, retries with backoff, failure alerts, a daily reconciliation sweep, and two staff actions (reprovision and rename) all run against a real Google Cloud Identity tenant from a Salesforce Developer Edition org. 144 Apex tests. The build log is in [`docs/PROGRESS-identity.md`](docs/PROGRESS-identity.md); design decisions, risks, and trade-offs are in [`docs/BRIEF-identity.md`](docs/BRIEF-identity.md).
 
 ## Why this exists
 
-This is a clean rebuild of a production integration I built in higher education, where Salesforce provisions Microsoft 365 accounts through Microsoft Graph. Many schools run Google instead of Microsoft, so this version targets Google Cloud Identity. More importantly, it redesigns the parts of the original that caused problems in production:
+This is a clean rebuild of a production integration I built in higher education, where Salesforce provisions Microsoft 365 accounts through Microsoft Graph. Many schools run Google instead, so this version targets Google Cloud Identity. More importantly, it redesigns the parts of the original that caused problems in production:
 
 | Problem in the original | Fix in this design |
 |---|---|
-| Students admitted through a second admit status were missed until the trigger was patched | Eligibility is a configurable status grouping, plus a scheduled reconciliation sweep. |
-| A retry after a partial failure could create a duplicate account for the same student | Every create looks the student up first by Salesforce ID, stored on the Google account. |
-| Initial passwords were stored on the student record between jobs | The password is generated, used, and emailed in one job and never stored. |
-| Bulk record updates could fail the user's own save | Work is handed off through Platform Events to a dedicated integration user. |
-| Long and non-Latin names produced broken usernames | A length-budgeted normalization function with fixture tests for hard names. |
-| Failures went unnoticed until someone looked | Sync log records, retries with backoff, and failure alerts. |
+| Students admitted through a second admit status were missed until the trigger was patched | Eligibility comes from one configurable status mapping that fails closed, plus a daily reconciliation sweep that finds anyone missed. |
+| A retry after a partial failure could create a second account for the same student | Every run looks the student up by Salesforce ID (stored on the Google account) before it creates anything. A name conflict on the student's own account links it instead of duplicating it. |
+| Initial passwords were stored on the student record between jobs | The password is generated, used, and emailed in one job. It never touches a field and is redacted from every log. |
+| Bulk record updates could fail the user's own save | The trigger only publishes a Platform Event. A subscriber running as a dedicated integration user does the work. |
+| Long, compound, and non-Latin names produced broken usernames | A length-budgeted normalization function with transliteration, defined truncation order, fallbacks, and 20 fixture names. |
+| Failures went unnoticed until someone looked | Every call is logged; transient failures retry with backoff; final failures reach an hourly digest to the admin address. |
+| Missed students were fixed by hand with anonymous Apex | A reconciliation sweep repairs drift through the normal path, and a Reprovision action on the record replaces ad hoc scripts. |
 
-## Lifecycle covered
+## What it does
 
-| Event | Trigger in Salesforce | Action in Google |
+| Event | Trigger in Salesforce | Google action |
 |---|---|---|
-| Joiner | Student reaches an admitted status | Create user in the demo OU, send welcome email |
-| Mover | Status changes | Move OU |
-| Mover | Program or term changes | Update group membership |
-| Leaver | Withdrawn | Suspend |
-| Return | Re-enrolled | Reactivate |
+| Joiner | Contact enters an active status with no account | Create in the status's OU with the Salesforce ID stored on the user, add program and term groups, email a welcome message with a temporary password |
+| Mover | Status changes between active statuses | Move OU |
+| Mover | Program or term changes | Add and remove managed groups only; unmanaged groups are never touched |
+| Name change | First or last name changes | Display name follows automatically; the username changes only through the Rename action |
+| Leaver | Withdrawn, Denied, or Cancelled | Suspend and move to Inactive in one call, then remove managed groups |
+| Return | Back to an active status | Reactivate and move in one call, then restore groups from the Contact |
+| Reprovision | Staff action on the Contact | New temporary password, change required at next sign-in, emailed to the student |
+| Rename | Staff action on the Contact | New username from the current name (old one kept as an alias), student notified |
+| Reconciliation | Daily schedule | Compare every Google user with Salesforce; repair drift, report anything it should not change |
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  subgraph SF["Salesforce (system of record)"]
+    C["Contact edit<br/>status, program, term, name"] -->|trigger| E(("Directory_Sync_Request__e"))
+    A["Staff actions<br/>Reprovision, Rename"] -->|publish| E
+    S["Daily schedule"] -->|publish Sweep| E
+    E --> H["Subscriber<br/>runs as integration user"]
+    H --> J["DirectorySyncJob<br/>one Contact per job"]
+    H --> W["DirectorySyncSweep<br/>500 users per job"]
+    W -->|republish drift| E
+    J --> L[("Directory Sync Log")]
+    W --> L
+    L --> D["Hourly digest to admin"]
+    J --> M["Welcome, reset, and rename emails"]
+  end
+  J -->|"Named Credential<br/>self-signed JWT"| G["Google Admin SDK<br/>Directory API"]
+  W --> G
+  G --> T["Cloud Identity Free tenant"]
 ```
-Salesforce
-  Contact trigger -> eligibility check -> Platform Event
-    -> subscriber (runs as a dedicated integration user)
-         -> one Queueable per record
-              -> GoogleDirectoryClient (Apex)
-                   -> Named Credential
-                        -> External Credential, JWT protocol
-                           (self-signed JWT per callout, signed with a non-exportable key)
-                        -> Google Admin SDK Directory API
-              -> result written back to the record, every call logged
-              -> welcome email from Salesforce after a successful create
-  scheduled reconciliation sweep -> same events
 
-Google Cloud Identity Free
-  service account with a custom admin role (users and groups only)
-  OUs and groups created by hand; the integration manages placement and membership
-```
+Every path into Google goes through the same platform event and the same integration user. The schedule and the staff actions never call Google themselves: scheduled Apex cannot make callouts, and staff do not hold the callout credential.
 
 ## Security design
 
-- **No super admin in the integration path.** The service account holds a custom admin role. No domain-wide delegation and no admin impersonation, so audit logs show the service account as the actor. Non-super-admin roles cannot modify admin accounts.
-- **The private key never leaves Salesforce.** The key pair is generated in Salesforce with private key export disabled. Only the public certificate is uploaded to Google. No service account key file exists.
-- **No token exchange.** Each callout carries a fresh self-signed JWT valid for two minutes. There are no access tokens to cache, leak, or refresh.
-- **Staff never hold the integration credential.** Users who edit student records don't need callout access. Only the dedicated integration user holds the credential permission set.
-- **Passwords are never stored.** Initial passwords exist only in memory for the one job that creates the account and sends the welcome email.
-- **Google's security baseline stays on.** One documented, project-scoped exception allows public key upload. Service account key creation stays disabled.
-- **Default over-permissions removed.** New Google Cloud orgs let every domain user create projects and billing accounts. That grant is removed.
-- **The integration doesn't build structure.** OUs and groups are created by hand. The integration only places users and manages membership.
-- **Idempotent by design.** Every create looks the user up first by Salesforce ID, stored on the Google user as an external ID.
-- **Demo data only,** in a clearly labeled demo OU.
+- **No domain-wide delegation, no super admin.** A Google service account holds a custom admin role limited to Users (create, read, update) and Groups (read, update). No delete. Admin accounts are out of its reach.
+- **No key file exists.** The signing key pair was generated in Salesforce with the private key marked non-exportable; only the public certificate was uploaded to Google. Salesforce signs a fresh JWT for each callout through a Named Credential, so there is no token handling in Apex.
+- **One narrow exception to Google's security baseline:** service account key upload is allowed for this one project. Key creation stays disabled.
+- **The callout credential belongs to one user.** Only the API-only integration user holds the permission set that can call Google. Staff who edit records, run the actions, or schedule jobs cannot.
+- **The integration user sees only in-scope records.** Account sharing is Private; a criteria sharing rule exposes only Accounts flagged in scope, and the job runs with sharing.
+- **Staff actions are gated twice.** Reprovision and Rename each check a custom permission and a 10-minute cooldown per student, and log who asked.
+- **Secrets stay out of logs.** Passwords are redacted from every request and response summary before anything is written.
+- **Detective control where a preventive one is impossible.** Google cannot scope a service account's role to one OU, so the sweep flags any user carrying a Salesforce ID outside the student OU tree.
 
-## Engineering notes from Phase 0
+## Reliability design
 
-- Salesforce's OAuth 2.0 JWT Bearer External Credential failed against Google's token endpoint with a blank error, while the identical key and claims succeeded through plain Apex. The JWT protocol (self-signed JWT straight to the API) works and turned out to be the simpler design.
-- The Directory API's user update call requires the general Users > Update privilege for any change, including suspend. The narrower Suspend Users privilege alone returns 403.
-- `customer=my_customer` returns 400 for a service account using its own admin role. Use the domain or customer ID.
-- Reads can lag writes by seconds. The design trusts write responses and lets the reconciliation sweep handle drift.
-
-## Stack
-
-- Salesforce (Apex, Flow, Platform Events, Named and External Credentials)
-- Google Cloud Identity Free and the Admin SDK Directory API
-- Cloudflare DNS and Email Routing for the demo domain
-
-Everything runs on free tiers. The only cost is the demo domain.
+- **Idempotent by construction.** Look up by Salesforce ID before any create; key every update on the immutable Google user ID; treat "already a member" and "not a member" as success.
+- **Callouts first, then email, then database writes,** so a failure never leaves a half-written record that blocks the next attempt.
+- **Retries with backoff:** rate limits, quota errors, 5xx, and timeouts re-run the whole job after 1, 2, then 4 minutes, up to 4 attempts. Retry decisions branch on Google's error reason, not the status code, because a 403 can mean either a quota error or a permission error.
+- **Alerts with a budget:** final failures are collected into one digest email per hour, at most 3 a day, because alerts share the org's daily email limit with welcome emails.
+- **Trust writes, reconcile later.** Google's reads can lag its writes, so nothing reads back to verify. The sweep catches drift instead, and its first live run did: a student whose account sat in the wrong OU, repaired through the normal path.
 
 ## What it doesn't do
 
 - **No account deletion.** Suspension is the end state, consistent with a retention-first policy.
-- **No Temporary Access Pass.** Google has no equivalent, so new accounts get a random initial password that must be changed at first sign-in. Delivering it by email is a documented trade-off.
-- **No Gmail or mailboxes.** Cloud Identity Free provides identities, not mail.
-- **No OU or group management.** OUs and groups are created by hand. The integration only places users and manages membership.
+- **The sweep does not check group membership.** That would cost one call per user; the job reconciles groups on every event instead.
+- **Leavers come from a Salesforce status field.** In a real deployment, leave and withdrawal signals would come from the student information system.
+- **Temporary passwords travel by email.** Google has no time-limited access pass for this flow. Mitigations: random 20-character password, forced change at first sign-in, personal address only.
+- **No duplicate-person detection.** The Salesforce ID prevents a second account for the same record, not for the same person entered twice.
+- **Old aliases are not cleaned up after a rename,** and on Cloud Identity Free they receive no mail (there is no Gmail). On a Workspace tenant, mail to the old address would still arrive.
+- **Developer Edition limits apply:** 15 single emails a day, and a Queueable chain of 5, which caps retries at 4 attempts and one sweep at 2,500 users.
+- **Retries are not used for staff actions.** A retry could send a second password or rename twice; a person can ask again after the cooldown.
+- **It depends on Google accepting self-signed JWTs** for the Directory API. A token-exchange fallback in Apex is proven but not wired in.
+- **No SSO.** Google as an identity provider for other apps is a possible follow-up on the same tenant.
 
-This section will grow as the build progresses.
+## Built with
 
-## Related projects
+Apex (Queueable with Finalizers, platform event triggers, invocable methods, Schedulable), Platform Events, Named and External Credentials (JWT protocol), Custom Metadata, custom permissions, screen flows and quick actions, Google Admin SDK Directory API, Google Cloud Identity Free, and Cloudflare (DNS and email routing).
 
-- [safe-agent-gateway](https://github.com/LukeStuard/safe-agent-gateway): MCP server connecting AI agents to Salesforce safely
-- [safe-document-intake](https://github.com/LukeStuard/safe-document-intake): serverless Salesforce-to-Google Drive document intake with AI screening
+## Tests
+
+144 Apex tests. Every Google call in a test goes through a routed `HttpCalloutMock` that fails the test on any unplanned request, so tests prove both what was sent and what was not.
+
+```
+sf apex run test --test-level RunLocalTests --result-format human --wait 10
+```
+
+## Repository layout
+
+```
+force-app/main/default/
+  classes/          Apex: client, planner, joiner, mover, job, sweep, alerts, actions, tests
+  triggers/         Contact trigger and platform event subscriber
+  objects/          Contact sync fields, sync log, request event, Custom Metadata types
+  customMetadata/   Settings, status mapping, group mapping
+  flows/            Reprovision and Rename screen flows
+  quickActions/     Contact actions
+  permissionsets/   Integration user, callout credential, admin access
+docs/
+  BRIEF-identity.md     Design, decisions, risks, open questions
+  PROGRESS-identity.md  Build log, including what failed and why
+scripts/apex/       One-off scripts for live tests and scheduling
+```
+
+## Documentation
+
+- [`docs/BRIEF-identity.md`](docs/BRIEF-identity.md): goals, the original's lessons, every design decision with its reason, limits, risks, and open questions.
+- [`docs/PROGRESS-identity.md`](docs/PROGRESS-identity.md): the build in order, including dead ends (an OAuth token exchange that failed with a blank error), live findings, and fixes.
