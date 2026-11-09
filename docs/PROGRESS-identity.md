@@ -203,3 +203,10 @@
 - Contact status is written as Suspended or Active only when the account change succeeded.
 - 78 tests passing.
 - Live on José García López: Withdrawn suspended and moved him with both groups removed; Enrolled reactivated and moved him with both groups restored.
+## 2026-11-09: Phase 5 quick checks
+
+- Repo: work PC merged origin/master (duplicate UsernameNormalizer add/add conflict); kept the org-retrieved version from the Mac. Verified identical to 36878f2 and pushed as 2d49533.
+- Developer Edition single email limit: 15 per day (`sf org list limits`, SingleEmail). Welcome emails, reprovision emails and failure alerts all draw on this budget, so alerts must be capped or batched, not just rate-limited.
+- Google name limit settled live: users.insert with familyName of 41 and 60 characters returned 200 and stored the full value; 61 returned 400 `invalid` ("Family name cannot be longer than 60 characters."). The 40-character figure on Google's Limits page is out of date.
+- Raised `UsernameNormalizer.MAX_DISPLAY_NAME` from 40 to 60, with fixtures at exactly 60 (kept) and 61 (capped). Salesforce caps Contact FirstName at 40, so this only changes last names of 41 to 80 characters.
+- Cleanup: deleted namelimit.41 and namelimit.60 test users, plus the Phase0 Test user and group (previously logged as deleted but still present). Removed Google Directory Sync from my own user after the test.

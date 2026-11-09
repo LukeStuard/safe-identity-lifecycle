@@ -115,7 +115,8 @@ private class UsernameNormalizerTest {
         Assert.areEqual('Mary Ann', UsernameNormalizer.displayName('Mary   Ann', 'x'));
         Assert.areEqual('Doe', UsernameNormalizer.displayName('   ', 'Doe'), 'Blank falls back');
         Assert.areEqual('Bob', UsernameNormalizer.displayName('<Bob>', 'x'), 'Angle brackets removed');
-        Assert.areEqual(40, UsernameNormalizer.displayName('A'.repeat(60), 'x').length());
+        Assert.areEqual('A'.repeat(60), UsernameNormalizer.displayName('A'.repeat(60), 'x'), 'Exactly 60 is kept whole');
+        Assert.areEqual(60, UsernameNormalizer.displayName('A'.repeat(61), 'x').length(), 'Capped at Google\'s 60');
         Assert.areEqual('李', UsernameNormalizer.displayName('李', 'x'), 'Non-Latin display names are kept');
     }
 }

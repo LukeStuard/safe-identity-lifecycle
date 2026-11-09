@@ -16,14 +16,14 @@
  *   fits in Google's 64-character limit. The last name is trimmed first.
  *
  * Display names keep Unicode, are trimmed and whitespace-collapsed, and are
- * capped at 40 characters (Google's docs give 40 and 60; 40 is safe for both).
+ * capped at 60 characters (the limit Google enforces, confirmed live 2026-11-09).
  */
 public inherited sharing class UsernameNormalizer {
 
     public static final Integer MAX_LOCAL_PART = 64;
     public static final Integer MAX_SUFFIX = 99;
     public static final Integer MAX_BASE = MAX_LOCAL_PART - 2;   // room for a 2-digit suffix
-    public static final Integer MAX_DISPLAY_NAME = 40;
+    public static final Integer MAX_DISPLAY_NAME = 60;
     private static final Integer MIN_LAST_WHEN_TRIMMING = 15;
 
     private static final Set<String> APOSTROPHES = new Set<String>{ '\'', '’', '‘', '`', 'ʼ' };

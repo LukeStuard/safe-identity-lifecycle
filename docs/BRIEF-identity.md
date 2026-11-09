@@ -263,7 +263,6 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 - Error handling and retry policy with backoff (delayed Queueables).
 - Failure alerts to admin@ (verified destination address, so free).
 - Reprovision action on the Contact: password reset plus a new welcome email, replacing ad hoc scripts.
-- Carried from Phase 2: live 41 to 60 character name create; record the Developer Edition daily email limit.
 - Decide and build name changes (open question 1).
 
 **Phase 6: Write-up**
@@ -290,7 +289,8 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 - **Long-lived signing key.** The uploaded key does not rotate on its own and expires November 4, 2027. Mitigation: overlapping rotation (see Decisions) before expiry.
 - **Self-signed JWT support.** The design depends on the Directory API continuing to accept self-signed JWTs. Fallback: the proven Apex token exchange.
 - **Eventual consistency.** Reads can lag writes. The design never depends on immediate read-back.
-- **Conflicting name limits in Google's docs.** Budgeting to 40 characters is safe either way; a Phase 5 live create records the real limit.
+- **Name limits.** Google's docs give 40 and 60; a live create in Phase 5 confirmed 60 is enforced. Display names are capped at 60.
+- **Developer Edition email limits.** 15 single emails per day, shared by welcome emails, reprovisioning and alerts. Alerts are capped so failures can't starve joiners.
 - **Developer Edition email limits.** Low daily cap on outbound email. Record the current number in Phase 5.
 - **Partial failures across systems.** A Salesforce failure cannot undo a Google write. Mitigation: every run looks up by `salesforce_id` first and links what it finds; a lost temporary password needs a reset (the Phase 5 reprovision action).
 - **Name quality depends on data entry.** Usernames follow the name fields as entered; a wrong split produces a valid but wrong username, fixable only through the rename path.
