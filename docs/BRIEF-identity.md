@@ -5,7 +5,7 @@ Salesforce as the system of record drives Google account lifecycle: create, upda
 Repo: `safe-identity-lifecycle` (working name)
 Progress log: `docs/PROGRESS-identity.md`
 Started: November 4, 2026
-Status: Phases 0 through 4 complete (joiner, mover, leaver, and return proven live). Phase 5 next.
+Status: Phases 0 through 5 complete (lifecycle paths, retries, alerts, reconciliation sweep, reprovision, and name changes, all proven live; 144 tests). Phase 6 (write-up) next.
 
 ---
 
@@ -81,6 +81,7 @@ How the original sits in the institution's pipeline, from past work on the produ
 - **The subscriber runs as a dedicated integration user,** set through `PlatformEventSubscriberConfig` (deployed as metadata). The default Automated Process user cannot send email; a specified user can. Run-as configuration applies to Apex subscribers only, so the subscriber is an Apex trigger, not a Flow.
 - **Integration user** `directory-sync@identity-lifecycle.dev`: Salesforce Integration license (Developer Edition includes one), Minimum Access - API Only Integrations profile, Salesforce API Integration permission set license. It never logs in.
 - **Org checks passed:** it can hold the `Google Directory Sync` permission set (External Credential Principal Access); it can be granted Contact Read/Edit with field-level access on standard and custom fields through `Directory Sync Data Access`; and it can send email through the org-wide address from the subscriber trigger.
+- **The integration user publishes events too.** The sweep and the two Contact actions hand work to the integration user by publishing `Directory_Sync_Request__e`, so it needs Create on that event (granted in `Directory Sync Data Access`). Without it the first sweep's repair silently never ran: `EventBus.publish` does not throw on failure, it returns the error. Every publish result is now checked.
 - **Only the integration user holds `Google Directory Sync`.** Removed from luke's own user at the end of Phase 1. Staff who edit Contacts never hold the callout credential.
 - **License-scoped grants:** Read on User External Credentials, granted in `Google Directory Sync` (a standard permission set), did not take effect for the Integration-licensed user. The grant had to live in `Directory Sync Data Access`, which is built on the Salesforce API Integration license. Assigning a permission set is not proof that every grant in it applies.
 
@@ -89,7 +90,7 @@ How the original sits in the institution's pipeline, from past work on the produ
 - **Account-scoped sharing, not a bypass.** Account org-wide default is Private and Contact is Controlled by Parent. A checkbox, `Account.Directory_Sync_In_Scope__c`, marks in-scope Accounts; the criteria sharing rule Directory Sync Scope shares them Read/Write with the Directory Sync Integration group, whose only member is the integration user. The job runs `with sharing` and sees only those Contacts.
 - **Why Read/Write on the Account rule:** with Contact Controlled by Parent, a sharing rule has no separate Contact access; Contacts inherit the Account level. The integration user's permission set grants only Read on the Account object, so it still cannot edit Accounts.
 - **Private Contacts** (no Account) are invisible to the integration user, and lookups to a record the running user cannot see fail even in system mode. Demo Contacts live under the Demo Students Account.
-- **People** get `Directory Sync Admin`: edit on the demo lifecycle fields, read-only on sync state, read-only on the logs (View All), the log tab, and the Shuraku University app. Profiles grant nothing; fields and objects deployed from source get no profile access.
+- **People** get `Directory Sync Admin`: edit on the demo lifecycle fields, read-only on sync state, read-only on the logs (View All), the log tab, the Shuraku University app, and the custom permissions `Directory_Sync_Reprovision` and `Directory_Sync_Rename` that the two Contact actions check. Profiles grant nothing; fields and objects deployed from source get no profile access.
 
 ### Authentication from Salesforce
 
@@ -107,6 +108,8 @@ How the original sits in the institution's pipeline, from past work on the produ
 - **Welcome message:** "Your Shuraku University Student Account", sent by Salesforce to the student's personal email, only after the Google create call succeeds and after every callout in the job. Plain text, with the username, temporary password, and sign-in link. Sent only when the job has just created the account and holds its password; a linked or adopted account gets no email.
 - **Why Salesforce sends it, not Google:** the original sent through Microsoft Graph, which bundles directory and mail in one API. Google splits them. Cloud Identity Free has no mailboxes, the Directory API cannot send mail, and sending through the Gmail API would require domain-wide delegation and user impersonation, which the design rules out. Salesforce email keeps the service account's scope to directory work only.
 - **Sender:** org-wide address `admin@shuraku.org` (display name Shuraku Admissions), verified, available to the System Administrator and Minimum Access - API Only Integrations profiles. Sent from the subscriber trigger as the integration user (Check 3 passed; DKIM signed by shuraku.org).
+- **Other messages from the same address:** a reset notice (new temporary password) from the reprovision action, a new-username notice (no password) from the rename action, and the hourly failure digest to admin@.
+- **Daily budget:** Developer Edition allows 15 single emails a day, shared by all of the above. The digest sends at most 3 in any rolling 24 hours, so failures cannot starve welcome emails, and it reserves capacity before every send.
 - **The integration user cannot query `OrgWideEmailAddress`,** so the address ID lives in Custom Metadata rather than being looked up at runtime.
 - **`setSaveAsActivity(false)`** on every welcome email, so the integration user never needs Task create access.
 - **Sending domain:** shuraku.org verified in Salesforce with an **active DKIM key** (selectors `sf1`/`sf2`, CNAMEs DNS only in Cloudflare). No Salesforce include in SPF; DKIM provides DMARC alignment.
@@ -117,16 +120,32 @@ How the original sits in the institution's pipeline, from past work on the produ
 
 - **Format:** `first.last@shuraku.org`, lowercase. Parenthetical nicknames dropped; accents transliterated (José to jose, Müller to mueller, ß to ss); apostrophes dropped; periods treated as spaces; spaces removed in first names and turned into hyphens in last names; only `a-z`, `0-9`, `.`, and `-` emitted.
 - **Fallbacks:** a part that cleans to nothing falls back to the other part; if both are empty (a name entirely in a non-Latin script), the username is `student.` plus six characters of the Contact ID.
-- **Length:** the base is capped at 62 characters, last name trimmed first, so a collision suffix up to 99 always fits Google's 64. Display names keep Unicode and are capped at 40.
+- **Length:** the base is capped at 62 characters, last name trimmed first, so a collision suffix up to 99 always fits Google's 64. Display names keep Unicode and are capped at 60, the limit Google enforces (confirmed live).
 - **Collisions:** on a 409, the job fetches the account holding the name. If it carries this Contact's `salesforce_id`, it is this student's account (an earlier run that failed after the create) and is linked, not duplicated. Otherwise the next suffix is tried, up to 10.
 - **Source data decides username quality.** The normalizer follows the first and last name fields as entered. A double surname typed partly into First Name produces a different username, and no code can tell a middle name from a first surname. Only the form, or the person, can.
+
+### Name changes (was open question 1)
+
+- **Hybrid.** Display names (givenName, familyName) follow the Contact automatically on every run. The username changes only through the **Rename Google Username** action, because a rename changes how the student signs in.
+- **Rename behavior:** Google turns the old address into an alias (on a Workspace tenant, mail to it still arrives; Cloud Identity Free has no mail). The password does not change. The student gets a notice with both usernames. Renames can take up to 10 minutes to propagate.
+- **Collisions on rename** use the same suffixes as a create. If the name is already an alias of the same account (renaming back to a previous name), the job refuses and says how to remove the alias, rather than handing out a suffixed name.
 
 ### Job design
 
 - **One job per Contact, in a fixed order:** read the Contact, look the user up by `salesforce_id`, plan, make every callout, send the welcome email, then write the Contact and logs. DML before a callout would block the callout, and email is only sent when the transaction commits.
 - **Google work is not rolled back by a Salesforce failure.** When a write-back failed after a successful create, the transaction rolled back the email and logs but the account remained. The next run found it by `salesforce_id` and linked it without a duplicate. This is why every run looks up before it creates.
 - **Settings are source-controlled.** Custom Metadata records deploy like code; a full deploy overwrote a Dry Run change made in Setup. Change settings in source.
+- **Retries:** a retryable Google failure (rate limit, quota, 5xx, timeout) re-enqueues the whole job after 1, 2, then 4 minutes, 4 attempts in total. Developer Edition caps a Queueable chain at 5, so the maximum is a constant. A retry re-plans from the Contact and starts with the lookup, so it resumes where the last run stopped. Every log row carries its attempt number.
+- **Alerts:** a final failure (not retryable, or out of attempts), a failed email, or an unhandled job failure marks its log row Pending. The hourly digest reports Pending rows to admin@ and marks them Sent. Retries in flight never alert.
 - **Tests do not depend on org settings.** The job takes test settings through instance fields (which travel with an enqueued job), and the flow tests pass with Dry Run on or off.
+
+### Operations
+
+- **Reconciliation sweep, daily at 8:23 AM.** Lists every user in the domain (500 per page, trimmed to five fields) and compares them with the Contacts in scope. Drift (wrong suspended state or OU, or an unrecorded Google ID) and never-provisioned Contacts are repaired by republishing a sync request, so the normal job fixes them with its own retries and alerts. Out-of-tree `salesforce_id`, unmanaged users inside the student tree, orphans, accounts missing from Google, a truncated sweep, and failed publishes are report-only and go to the digest. A missing account is never recreated automatically.
+- **Scheduled Apex cannot make callouts and runs as whoever scheduled it,** and staff do not hold the callout credential. The schedule and both Contact actions therefore only publish an event (`Kind__c` Sweep, Reprovision, or Rename); the subscriber starts the work as the integration user.
+- **Reprovision action:** new temporary password (change required at next sign-in) and a reset notice, for an existing active account. Refuses with no account, a suspended account, no personal email, or dry run on.
+- **Both actions** check a custom permission, apply a 10-minute cooldown per Contact, log who asked, and do not retry (a retry could send a second password or rename twice).
+- **Scheduled jobs block Apex deploys** by default. This dev org allows deployments with pending Apex jobs; a production org would pause and reschedule instead.
 
 ### Groups
 
@@ -150,7 +169,7 @@ How the original sits in the institution's pipeline, from past work on the produ
 
 ### Directory API limits (from Google's docs)
 
-- **Names:** Google's docs disagree. The users resource reference and the Help Center allow 60 characters for given and family names; the Limits page says 40. The normalizer budgets to 40; a live 41 to 60 character create (carried to Phase 5) settles which the API enforces.
+- **Names:** Google's docs disagree (the users resource reference and the Help Center say 60; the Limits page says 40). A live create settled it: 41 and 60 characters were accepted and stored in full; 61 returned 400 `invalid`. The limit is 60.
 - **Usernames (local part):** up to 64 characters, lowercase, no consecutive periods, cannot begin or end with a period. Google allows apostrophes and some symbols but warns they break downstream sync tools, so the normalizer emits only `a-z`, `0-9`, `.`, and `-`.
 - **Passwords:** 8 to 100 ASCII characters.
 - **Rate limits:** user creates capped at 10 per domain per second; default quota 2,400 queries per minute per user per project. One record per job stays far below both.
@@ -184,6 +203,9 @@ How the original sits in the institution's pipeline, from past work on the produ
 | Proof calls: list, create, find by externalId, suspend, group add/remove | Passed |
 | Integration user checks: credential permission set, Contact access, email send | Passed |
 | Directory API limits and quotas recorded | Done |
+| Scheduled jobs: alert digest hourly at :07, reconciliation sweep daily at 8:23 AM | Done |
+| Deployment Settings: allow deployments with pending Apex jobs (dev org) | Done |
+| Contact actions Reprovision Google Account and Rename Google Username (screen flows, quick actions, custom permissions) | Done |
 | OU-scoped role assignment | Not available for service accounts (see Decisions) |
 
 ## 5. Architecture
@@ -205,10 +227,18 @@ Salesforce (system of record)
                    -> Google Admin SDK Directory API
          -> welcome email after the last callout (org-wide address, DKIM)
          -> write state to the Contact; insert every call's log row
-  Scheduled reconciliation sweep (Phase 5)
-    -> finds eligible-but-unprovisioned and drifted records
-    -> flags Google users with a salesforce_id outside the student OU tree
-    -> publishes the same events
+         -> retryable failure: re-enqueue itself after 1, 2, 4 minutes
+         -> final failure: log row marked Pending for the digest
+  Contact actions (Reprovision, Rename; custom permission, cooldown)
+    -> publish the same event with Kind__c; the subscriber runs the job
+       in reprovision or rename mode as the integration user
+  Daily sweep schedule
+    -> publishes Kind__c = Sweep; DirectorySyncSweep runs as the
+       integration user, one Queueable per 500 users
+    -> drift and never-provisioned: republishes sync requests
+    -> out-of-tree, unmanaged, orphan, missing: reported, not changed
+  Hourly alert digest
+    -> one email to admin@ listing Pending rows, at most 3 per day
 
 Google Cloud Identity Free
   Service account  -> custom admin role (users, groups), domain-wide scope
@@ -233,7 +263,7 @@ Design principles:
 | Joiner | Enters an Active status, no account yet | Create in the status's OU with `salesforce_id`, add program and term groups, send welcome email |
 | Mover | Status changes between Active statuses | Move OU |
 | Mover | Program or term changes | Add and remove managed groups |
-| Update | Name change | Not yet handled; see open question 1 |
+| Update | Name change | Display name follows the Contact automatically; username changes only through the Rename Google Username action |
 | Leaver | Withdrawn, Denied, or Cancelled | Suspend and move to Inactive in one call, then remove managed groups |
 | Return | Back to an Active status | Reactivate and move in one call, then restore groups from the Contact |
 
@@ -258,12 +288,13 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 **Phase 4: Leaver and return** (complete)
 - Suspend into Inactive with groups removed; reactivate with groups restored. Proven live.
 
-**Phase 5: Reconciliation and operations**
-- Scheduled sweep, including the out-of-tree check.
-- Error handling and retry policy with backoff (delayed Queueables).
-- Failure alerts to admin@ (verified destination address, so free).
-- Reprovision action on the Contact: password reset plus a new welcome email, replacing ad hoc scripts.
-- Decide and build name changes (open question 1).
+**Phase 5: Reconciliation and operations** (complete)
+- Quick checks: Developer Edition single email limit is 15 a day; Google's name limit is 60 (display name cap raised from 40).
+- Retry with backoff through delayed Queueables, attempt on every log row.
+- Hourly failure digest to admin@, capped at 3 a day.
+- Daily reconciliation sweep with the out-of-tree check. Its first live run found real drift (a student in the wrong OU) and exposed a silent publish failure: the integration user lacked Create on the request event. Fixed, re-run, repaired, and a third run came back clean.
+- Reprovision action, proven live (new password delivered, cooldown refused a second click, forced change at sign-in).
+- Name changes decided (hybrid) and built: display names sync automatically; the Rename action renamed the demo student's username and sent the notice.
 
 **Phase 6: Write-up**
 - README (including "What it doesn't do"), redacted screenshots, LinkedIn post.
@@ -291,10 +322,10 @@ Each phase ends with a check: what was planned, what got done, what moved or got
 - **Eventual consistency.** Reads can lag writes. The design never depends on immediate read-back.
 - **Name limits.** Google's docs give 40 and 60; a live create in Phase 5 confirmed 60 is enforced. Display names are capped at 60.
 - **Developer Edition email limits.** 15 single emails per day, shared by welcome emails, reprovisioning and alerts. Alerts are capped so failures can't starve joiners.
-- **Developer Edition email limits.** Low daily cap on outbound email. Record the current number in Phase 5.
-- **Partial failures across systems.** A Salesforce failure cannot undo a Google write. Mitigation: every run looks up by `salesforce_id` first and links what it finds; a lost temporary password needs a reset (the Phase 5 reprovision action).
-- **Name quality depends on data entry.** Usernames follow the name fields as entered; a wrong split produces a valid but wrong username, fixable only through the rename path.
-- **Cloud Identity Free user cap** is 50. The reconciliation sweep must not create users in a loop.
+- **Partial failures across systems.** A Salesforce failure cannot undo a Google write. Mitigation: every run looks up by `salesforce_id` first and links what it finds; a lost temporary password is fixed with the Reprovision action.
+- **Name quality depends on data entry.** Usernames follow the name fields as entered; a wrong split produces a valid but wrong username, fixable through the Rename action after the name fields are corrected.
+- **Cloud Identity Free user cap** is 50. The sweep never creates users directly; it only republishes requests for Contacts that were never attempted, and it never recreates a missing account.
+- **Silent publish failures.** `EventBus.publish` returns errors instead of throwing. Every publish result is checked, and a failure is reported to the digest.
 - **Google API quotas.** Recorded (see Decisions). Retries back off and branch on error reason.
 
 ## 10. Open questions
@@ -307,9 +338,9 @@ Resolved:
 - **Group model (was question 2):** flat program and term groups, with cohort groups possible later as configuration (see Decisions).
 - **Memberships on suspend (was question 4):** remove managed groups on suspend; restore them from the Contact on return.
 - **Username format:** `first.last`, with the rules in Decisions.
+- **Name changes (was question 1):** hybrid. Display names follow the Contact; the username changes only through the Rename action (see Decisions).
 
 Open:
-1. **Name changes:** keep the primary email and add the new name as an alias, or rename the primary email? Test case: the demo Contact entered as "José García" / "López" (`josegarcia.lopez@shuraku.org`); correcting it to "José" / "García López" exercises the rename path.
 3. **Security-labeled groups:** should the real program and term groups carry the security label (permanent once applied) if they will drive access, such as SSO app assignment?
 5. **Duplicate Contacts:** the `externalId` lookup prevents a second account for the same Contact, but not for the same person with two Contacts (for example, a returning applicant who registers again). Add a pre-create check on personal email that flags a possible duplicate for review instead of creating an account?
 
@@ -324,6 +355,8 @@ Open:
 - SSO hub: Google as IdP over SAML into Salesforce and my other apps.
 - Incident response case study on the same tenant.
 - Cohort groups (program and term together) as Custom Metadata records, if cohort communication is needed.
+- Group membership in the sweep (one call per user; the job already reconciles groups on every event).
+- Alias cleanup after renames, once the old addresses are no longer needed.
 
 ## 12. References
 
@@ -340,3 +373,6 @@ Open:
 - Salesforce: PlatformEventSubscriberConfig (Tooling API): https://developer.salesforce.com/docs/atlas.en-us.api_tooling.meta/api_tooling/tooling_api_objects_platformeventsubscriberconfig.htm
 - Google: Directory API groups.list (customer or domain required): https://developers.google.com/admin-sdk/directory/reference/rest/v1/groups/list
 - Cloud Identity editions: https://cloud.google.com/identity/docs/editions
+- Google: Change a user's email address (old address becomes an alias): https://knowledge.workspace.google.com/admin/users/change-a-users-email-address
+- Salesforce: Queueable Apex (delayed enqueue, chain depth): https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_queueing_jobs.htm
+- Salesforce: Platform event permissions (Create to publish): https://developer.salesforce.com/docs/atlas.en-us.platform_events.meta/platform_events/platform_events_intro_emp.htm
