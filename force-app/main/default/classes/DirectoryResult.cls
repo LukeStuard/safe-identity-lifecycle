@@ -8,7 +8,8 @@ public inherited sharing class DirectoryResult {
 
     private static final Set<String> RETRYABLE_REASONS = new Set<String>{
         'quotaExceeded', 'userRateLimitExceeded', 'rateLimitExceeded',
-        'backendError', 'calloutException'
+        'backendError', 'internalError', 'calloutException',
+        'RESOURCE_EXHAUSTED', 'UNAVAILABLE'
     };
     private static final Set<Integer> RETRYABLE_STATUSES = new Set<Integer>{ 429, 500, 502, 503, 504 };
 
@@ -71,6 +72,25 @@ public inherited sharing class DirectoryResult {
             return false;
         }
         return RETRYABLE_REASONS.contains(errorReason) || RETRYABLE_STATUSES.contains(statusCode);
+    }
+
+    /**
+     * Classifies a reason string after the response is gone. Accepts a Google
+     * reason ("rateLimitExceeded") or the "http" + status form ("http503")
+     * that callers record when Google sent no reason.
+     */
+    public static Boolean isRetryableReason(String reason) {
+        if (String.isBlank(reason)) {
+            return false;
+        }
+        if (RETRYABLE_REASONS.contains(reason)) {
+            return true;
+        }
+        String digits = reason.removeStart('http');
+        if (digits != reason && digits.isNumeric()) {
+            return RETRYABLE_STATUSES.contains(Integer.valueOf(digits));
+        }
+        return false;
     }
 
     public String getString(String key) {

@@ -5,23 +5,37 @@
  * If the row cannot be linked to the Contact (deleted, or not visible to the
  * running user), it is written without the link and the Contact ID is kept
  * in the summary, so a failure is never silently lost.
- * Retry policy arrives in Phase 5.
+ *
+ * Unhandled exceptions are not retried. Transient Google errors are handled
+ * inside the job and retried there; an exception that escapes the job is a
+ * bug or a governor limit, and running it again would fail the same way.
  */
 public with sharing class DirectorySyncFinalizer implements Finalizer {
 
     private final Id contactId;
+    private final Integer attempt;
 
     public DirectorySyncFinalizer(Id contactId) {
+        this(contactId, null);
+    }
+
+    public DirectorySyncFinalizer(Id contactId, Integer attempt) {
         this.contactId = contactId;
+        this.attempt = attempt;
     }
 
     public void execute(FinalizerContext ctx) {
-        record(contactId, ctx.getResult(), ctx.getException());
+        record(contactId, attempt, ctx.getResult(), ctx.getException());
+    }
+
+    @TestVisible
+    private static void record(Id contactId, ParentJobResult result, Exception e) {
+        record(contactId, null, result, e);
     }
 
     /** Separated from execute() so tests can drive it without a FinalizerContext. */
     @TestVisible
-    private static void record(Id contactId, ParentJobResult result, Exception e) {
+    private static void record(Id contactId, Integer attempt, ParentJobResult result, Exception e) {
         if (result != ParentJobResult.UNHANDLED_EXCEPTION) {
             return;
         }
@@ -31,6 +45,7 @@ public with sharing class DirectorySyncFinalizer implements Finalizer {
             Operation__c = 'Job Failure',
             Success__c = false,
             Error_Reason__c = 'unhandledException',
+            Attempt__c = attempt,
             Request_Summary__c = 'DirectorySyncJob for ' + contactId,
             Response_Summary__c = detail.left(32000)
         );

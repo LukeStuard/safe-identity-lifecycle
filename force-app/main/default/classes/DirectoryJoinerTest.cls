@@ -247,7 +247,7 @@ private class DirectoryJoinerTest {
         run(c.Id, settings(false, true), false);
 
         Contact after = reload(c.Id);
-        Assert.isTrue(after.Google_Last_Error__c.startsWith('quotaExceeded'), after.Google_Last_Error__c);
+        Assert.isTrue(after.Google_Last_Error__c.startsWith('[Retry 2 of 4 in 1 min] quotaExceeded'), after.Google_Last_Error__c);
         Assert.isNull(after.Google_Account_Status__c, 'A failed lookup does not change account status');
     }
 

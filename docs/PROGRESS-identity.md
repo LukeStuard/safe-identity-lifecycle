@@ -210,3 +210,12 @@
 - Google name limit settled live: users.insert with familyName of 41 and 60 characters returned 200 and stored the full value; 61 returned 400 `invalid` ("Family name cannot be longer than 60 characters."). The 40-character figure on Google's Limits page is out of date.
 - Raised `UsernameNormalizer.MAX_DISPLAY_NAME` from 40 to 60, with fixtures at exactly 60 (kept) and 61 (capped). Salesforce caps Contact FirstName at 40, so this only changes last names of 41 to 80 characters.
 - Cleanup: deleted namelimit.41 and namelimit.60 test users, plus the Phase0 Test user and group (previously logged as deleted but still present). Removed Google Directory Sync from my own user after the test.
+## 2026-11-09: Phase 5 retry with backoff
+
+- A retryable Google failure (rate limit, quota, 5xx, timeout) re-enqueues the whole DirectorySyncJob with a delay of 1, 2, then 4 minutes, 4 attempts in total. Developer Edition caps a Queueable chain at 5, so the maximum is a constant, not a setting.
+- A retry re-plans from the Contact and starts with the salesforce_id lookup, so it resumes where the last run stopped. Existing idempotency (adopt on 409, 409 and 404 on groups count as success) makes a retry and a fresh event-triggered job converge.
+- Every log row carries Attempt__c (field and FLS existed since Phase 1). Google_Last_Error__c is prefixed "[Retry N of 4 in M min]" or "[Gave up after 4 attempts]".
+- DirectoryResult.isRetryableReason classifies a stored reason, including the "http" + status form. Added internalError, RESOURCE_EXHAUSTED and UNAVAILABLE as retryable.
+- The finalizer does not retry: an exception that escapes the job is a bug or a governor limit. Its rows now carry the attempt.
+- Apex tests cannot chain Queueables, so the job skips the enqueue under Test.isRunningTest(); tests assert the decision through the plan log and the Contact. 85 tests passing.
+- Known gap: a create that times out after Google accepted it is adopted on retry, so no welcome email is sent; that student needs the reprovision action (Phase 5 step 5).

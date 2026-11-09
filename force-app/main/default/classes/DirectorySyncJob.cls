@@ -14,10 +14,29 @@
  *
  * Order matters: every callout first, then the welcome email, then DML.
  * Unhandled failures are recorded by DirectorySyncFinalizer.
+ *
+ * Retries: a retryable Google failure (rate limit, quota, 5xx, timeout)
+ * re-enqueues the whole job with a delay of 1, 2, then 4 minutes, up to
+ * MAX_ATTEMPTS runs in total. A retry re-plans from the Contact and starts
+ * with the salesforce_id lookup, so it resumes where the last run stopped:
+ * a create that succeeded before a group add failed comes back as a mover
+ * run. Every log row carries the attempt number. Developer Edition allows a
+ * chain of 5 Queueables, so 4 attempts fit with room to spare. If a new
+ * Contact edit enqueues a fresh job while a retry is pending, both converge
+ * for the same reason (lookup first, adopt on 409, 409 and 404 on groups
+ * count as success).
  */
 public with sharing class DirectorySyncJob implements Queueable, Database.AllowsCallouts {
 
+    public static final Integer MAX_ATTEMPTS = 4;
+    public static final Integer MAX_DELAY_MINUTES = 10;   // platform limit for enqueueJob delay
+
     private final Id contactId;
+    private final Integer attempt;
+
+    /** First failure seen in this run; decides whether to retry. */
+    private transient String failureReason;
+    private transient Boolean failureRetryable;
 
     /** Test hooks. Instance fields travel with the job when it is enqueued. */
     @TestVisible
@@ -28,11 +47,16 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
     private Boolean forceEmailFailure = false;
 
     public DirectorySyncJob(Id contactId) {
+        this(contactId, 1);
+    }
+
+    public DirectorySyncJob(Id contactId, Integer attempt) {
         this.contactId = contactId;
+        this.attempt = attempt == null || attempt < 1 ? 1 : attempt;
     }
 
     public void execute(QueueableContext ctx) {
-        System.attachFinalizer(new DirectorySyncFinalizer(contactId));
+        System.attachFinalizer(new DirectorySyncFinalizer(contactId, attempt));
 
         List<Contact> rows = [
             SELECT Id, FirstName, LastName, Email, Lifecycle_Status__c, Program__c, Term__c, Google_User_Id__c
@@ -45,6 +69,7 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                 Operation__c = 'Plan',
                 Success__c = false,
                 Error_Reason__c = 'contactNotFound',
+                Attempt__c = attempt,
                 Request_Summary__c = 'Contact ' + contactId,
                 Response_Summary__c = 'Contact not found or outside the sync scope (no in-scope Account); nothing to do.'
             );
@@ -74,6 +99,9 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                 Boolean sendWelcome = settings.Send_Welcome_Email__c == true;
                 DirectoryJoiner.Outcome outcome = DirectoryJoiner.create(c, mapping, settings.Domain__c, sendWelcome, client);
                 patch = outcome.toContact(contactId);
+                if (!outcome.success) {
+                    noteFailure(outcome.errorReason, DirectoryResult.isRetryableReason(outcome.errorReason));
+                }
 
                 if (outcome.success && syncGroups) {
                     DirectoryMover.Result groups = new DirectoryMover.Result();
@@ -81,6 +109,9 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                         outcome.googleUserId, desiredGroups, managedGroups, !outcome.adopted, client, groups
                     );
                     record(patch, groups, plan);
+                    if (!groups.success) {
+                        noteFailure(groups.errorReason, DirectoryResult.isRetryableReason(groups.errorReason));
+                    }
                 }
 
                 // All callouts are done. The email goes out before any DML.
@@ -105,6 +136,8 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                     Id = contactId,
                     Google_Last_Error__c = (plan.errorReason + ': ' + plan.reason).left(255)
                 );
+                // A failed lookup carries the response; multipleMatches and config errors never retry.
+                noteFailure(plan.errorReason, lookup != null && lookup.isRetryable());
             } else {
                 patch = linkExistingAccount(c, lookup, plan);
 
@@ -148,18 +181,81 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
                         patch.Google_Account_Status__c = target;
                     }
                     record(patch, result, plan);
+                    if (!result.success) {
+                        noteFailure(result.errorReason, DirectoryResult.isRetryableReason(result.errorReason));
+                    }
                 }
             }
         }
 
+        Integer retryDelay = applyRetryPolicy(patch, plan);
+
         List<Directory_Sync_Log__c> logs = new List<Directory_Sync_Log__c>(client.getPendingLogs());
         logs.add(plan.toLog(contactId, c.Lifecycle_Status__c, mapping, dryRun));
         logs.addAll(extraLogs);
+        for (Directory_Sync_Log__c l : logs) {
+            l.Attempt__c = attempt;
+        }
 
         if (patch != null) {
             update patch;
         }
         insert logs;
+
+        // Last, after all DML: if this transaction rolls back, the retry is never queued.
+        if (retryDelay != null) {
+            enqueueRetry(retryDelay);
+        }
+    }
+
+    /** Minutes to wait before the next attempt, or null when there is no next attempt. */
+    @TestVisible
+    private static Integer retryDelay(Integer attempt, Boolean retryable) {
+        if (retryable != true || attempt == null || attempt >= MAX_ATTEMPTS) {
+            return null;
+        }
+        return Math.min(1 << (attempt - 1), MAX_DELAY_MINUTES);
+    }
+
+    private void noteFailure(String reason, Boolean retryable) {
+        if (failureRetryable == null) {
+            failureReason = reason;
+            failureRetryable = retryable == true;
+        }
+    }
+
+    /** Records the retry decision on the plan and the Contact; returns the delay, or null. */
+    private Integer applyRetryPolicy(Contact patch, DirectorySyncPlanner.Plan plan) {
+        if (failureRetryable == null) {
+            return null;
+        }
+        Integer delay = retryDelay(attempt, failureRetryable);
+        String prefix;
+        if (delay != null) {
+            plan.steps.add('Retrying: attempt ' + (attempt + 1) + ' of ' + MAX_ATTEMPTS + ' scheduled in '
+                + delay + (delay == 1 ? ' minute' : ' minutes') + ' (' + failureReason + ').');
+            prefix = '[Retry ' + (attempt + 1) + ' of ' + MAX_ATTEMPTS + ' in ' + delay + ' min] ';
+        } else if (failureRetryable) {
+            plan.steps.add('Retryable failure (' + failureReason + '), but no attempts left (' + attempt + ' of ' + MAX_ATTEMPTS + ').');
+            prefix = '[Gave up after ' + MAX_ATTEMPTS + ' attempts] ';
+        } else {
+            return null;
+        }
+        if (patch != null && String.isNotBlank(patch.Google_Last_Error__c)) {
+            patch.Google_Last_Error__c = (prefix + patch.Google_Last_Error__c).left(255);
+        }
+        return delay;
+    }
+
+    private void enqueueRetry(Integer delayMinutes) {
+        DirectorySyncJob next = new DirectorySyncJob(contactId, attempt + 1);
+        next.injectedSettings = injectedSettings;
+        next.injectedGroupMappings = injectedGroupMappings;
+        // Apex tests cannot chain Queueables; the decision is asserted through the plan log and the Contact.
+        if (Test.isRunningTest()) {
+            return;
+        }
+        System.enqueueJob(next, delayMinutes);
     }
 
     private static Boolean needsGoogle(Directory_Status_Mapping__mdt mapping) {
