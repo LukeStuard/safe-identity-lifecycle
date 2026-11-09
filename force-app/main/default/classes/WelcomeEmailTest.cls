@@ -15,6 +15,18 @@ private class WelcomeEmailTest {
     }
 
     @IsTest
+    static void resetMessageIsWordedAsAReset() {
+        Messaging.SingleEmailMessage m = WelcomeEmail.buildReset('Jane', 'jane.doe@shuraku.org', 'New-Pass-456', 'jane.personal@example.com', null);
+        Assert.areEqual('Your Shuraku University Student Account: New Temporary Password', m.getSubject());
+        String body = m.getPlainTextBody();
+        Assert.isTrue(body.contains('A new temporary password has been set'), body);
+        Assert.isFalse(body.contains('Your student account is ready.'), body);
+        Assert.isTrue(body.contains('Username: jane.doe@shuraku.org'));
+        Assert.isTrue(body.contains('Temporary password: New-Pass-456'));
+        Assert.isFalse(body.contains('—'), 'No em-dashes');
+    }
+
+    @IsTest
     static void blankFirstNameGetsPlainGreeting() {
         Assert.isTrue(WelcomeEmail.body('  ', 'u@shuraku.org', 'p').startsWith('Hi,'));
     }

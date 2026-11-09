@@ -8,6 +8,7 @@
 public inherited sharing class WelcomeEmail {
 
     public static final String SUBJECT = 'Your Shuraku University Student Account';
+    public static final String RESET_SUBJECT = 'Your Shuraku University Student Account: New Temporary Password';
     public static final String SIGN_IN_URL = 'https://accounts.google.com';
 
     public static Messaging.SingleEmailMessage build(
@@ -17,13 +18,28 @@ public inherited sharing class WelcomeEmail {
         String toAddress,
         String orgWideAddressId
     ) {
+        return message(SUBJECT, body(firstName, username, password, false), toAddress, orgWideAddressId);
+    }
+
+    /** Sent by the reprovision action: same details, worded as a reset. */
+    public static Messaging.SingleEmailMessage buildReset(
+        String firstName,
+        String username,
+        String password,
+        String toAddress,
+        String orgWideAddressId
+    ) {
+        return message(RESET_SUBJECT, body(firstName, username, password, true), toAddress, orgWideAddressId);
+    }
+
+    private static Messaging.SingleEmailMessage message(String subject, String text, String toAddress, String orgWideAddressId) {
         Messaging.SingleEmailMessage m = new Messaging.SingleEmailMessage();
         if (String.isNotBlank(orgWideAddressId)) {
             m.setOrgWideEmailAddressId(orgWideAddressId);
         }
         m.setToAddresses(new List<String>{ toAddress });
-        m.setSubject(SUBJECT);
-        m.setPlainTextBody(body(firstName, username, password));
+        m.setSubject(subject);
+        m.setPlainTextBody(text);
         m.setSaveAsActivity(false);
         m.setUseSignature(false);
         m.setBccSender(false);
@@ -32,11 +48,17 @@ public inherited sharing class WelcomeEmail {
 
     @TestVisible
     private static String body(String firstName, String username, String password) {
+        return body(firstName, username, password, false);
+    }
+
+    private static String body(String firstName, String username, String password, Boolean reset) {
         String greeting = String.isBlank(firstName) ? 'Hi,' : 'Hi ' + firstName.trim() + ',';
         return String.join(new List<String>{
             greeting,
             '',
-            'Your student account is ready.',
+            reset
+                ? 'A new temporary password has been set for your student account. Your previous password no longer works.'
+                : 'Your student account is ready.',
             '',
             'Username: ' + username,
             'Temporary password: ' + password,

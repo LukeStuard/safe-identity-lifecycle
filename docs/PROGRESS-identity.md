@@ -251,3 +251,10 @@
 - Found and fixed: the repair never ran. The integration user had no Create on Directory_Sync_Request__e, and EventBus.publish does not throw, so the failure was silent. Granted Create and Read in Directory Sync Data Access; the sweep now checks every publish result and reports publishFailed. Second run: drift republished, job moved Smoke Test to Enrolled (200); third run quiet.
 - Confirmed the Phase0 Test user and namelimit test users are gone (domain has 3 users).
 - 116 tests passing.
+## 2026-11-09: Phase 5 reprovision action
+
+- Reprovision Google Account quick action on Contact (screen flow `Reprovision_Google_Account`: confirm, then result). Calls `DirectorySyncReprovision` (invocable), which never calls Google: it checks the `Directory_Sync_Reprovision` custom permission (granted by Directory Sync Admin), that the Contact records a Google account, is not Suspended, and has a personal email, and a 10-minute cooldown read from Password Reset log rows; then publishes a Directory_Sync_Request__e with Kind__c = Reprovision and logs who asked.
+- The subscriber runs `DirectorySyncJob.forReprovision` as the integration user: looks up the account by salesforce_id, refuses (alerted) for no account, suspended, no personal email, or dry run; otherwise sets a new temporary password with change required at next sign-in (redacted in the log) and sends a reset-worded welcome email (`WelcomeEmail.buildReset`). A failed email marks the Contact Error and alerts. Not retried: a person can ask again after the cooldown, and a retry could send a second password.
+- `DirectoryJoiner.generatePassword` is now public and shared by both paths. Added `Password Reset` to the Operation picklist.
+- Live on Smoke Test: request logged as luke; integration user looked up, reset the password, and emailed it; a second click within 10 minutes was refused; signed in as smoke.test@shuraku.org with the temporary password and was required to set a new one. Smoke Test's unknown-password loose end is closed.
+- 129 tests passing.

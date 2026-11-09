@@ -7,6 +7,9 @@
  * An event with Kind__c = "Sweep" starts DirectorySyncSweep instead. The
  * schedule publishes that event, so the sweep's callouts run as the
  * integration user rather than as whoever scheduled it.
+ *
+ * An event with Kind__c = "Reprovision" starts a password reprovision job
+ * for its Contact (see DirectorySyncReprovision).
  */
 public inherited sharing class DirectorySyncRequestHandler {
 
@@ -15,10 +18,18 @@ public inherited sharing class DirectorySyncRequestHandler {
             return;
         }
         Set<Id> contactIds = new Set<Id>();
+        Set<Id> reprovisionIds = new Set<Id>();
         Boolean sweep = false;
         for (Directory_Sync_Request__e e : events) {
             if (e.Kind__c == DirectorySyncSweep.KIND) {
                 sweep = true;
+                continue;
+            }
+            if (e.Kind__c == DirectorySyncReprovision.KIND) {
+                Id rid = toContactId(e.Contact_Id__c);
+                if (rid != null) {
+                    reprovisionIds.add(rid);
+                }
                 continue;
             }
             Id cid = toContactId(e.Contact_Id__c);
@@ -28,6 +39,9 @@ public inherited sharing class DirectorySyncRequestHandler {
         }
         for (Id cid : contactIds) {
             System.enqueueJob(new DirectorySyncJob(cid));
+        }
+        for (Id rid : reprovisionIds) {
+            System.enqueueJob(DirectorySyncJob.forReprovision(rid));
         }
         if (sweep) {
             System.enqueueJob(new DirectorySyncSweep());

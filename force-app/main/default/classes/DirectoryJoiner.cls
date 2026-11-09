@@ -135,8 +135,8 @@ public inherited sharing class DirectoryJoiner {
         return false;
     }
 
-    @TestVisible
-    private static String generatePassword() {
+    /** Random temporary password; also used by the reprovision path. */
+    public static String generatePassword() {
         Integer n = PASSWORD_CHARS.length();
         String out = '';
         for (Integer i = 0; i < PASSWORD_LENGTH; i++) {

@@ -4,7 +4,15 @@
         <application>Shuraku_University</application>
         <visible>true</visible>
     </applicationVisibilities>
-    <description>For people who run and audit the directory sync: edit demo lifecycle fields on Contact, read Google sync state, and read all sync logs. Does not grant callout access.</description>
+    <classAccesses>
+        <apexClass>DirectorySyncReprovision</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <customPermissions>
+        <enabled>true</enabled>
+        <name>Directory_Sync_Reprovision</name>
+    </customPermissions>
+    <description>For people who run and audit the directory sync: edit demo lifecycle fields on Contact, read Google sync state, read all sync logs, and request a password reprovision. Does not grant callout access.</description>
     <fieldPermissions>
         <editable>true</editable>
         <field>Account.Directory_Sync_In_Scope__c</field>

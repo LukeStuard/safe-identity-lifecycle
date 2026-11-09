@@ -29,6 +29,13 @@
  * Alerts: a final failure (not retryable, or out of attempts) and a failed
  * welcome email mark their log row Alert_Status__c = Pending. The hourly
  * DirectorySyncAlerts digest reports them; retries in flight never alert.
+ *
+ * Reprovision mode (forReprovision): sets a new temporary password on an
+ * existing, active account and emails it with a reset-worded welcome email.
+ * Refuses, and alerts, when there is no account, the account is suspended,
+ * the Contact has no personal email, or dry run is on. Not retried: a person
+ * asked for it and can ask again after the cooldown, and a retry could send
+ * a second password.
  */
 public with sharing class DirectorySyncJob implements Queueable, Database.AllowsCallouts {
 
@@ -37,6 +44,7 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
 
     private final Id contactId;
     private final Integer attempt;
+    private Boolean reprovision = false;
 
     /** First failure seen in this run; decides whether to retry. */
     private transient String failureReason;
@@ -57,6 +65,13 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
     public DirectorySyncJob(Id contactId, Integer attempt) {
         this.contactId = contactId;
         this.attempt = attempt == null || attempt < 1 ? 1 : attempt;
+    }
+
+    /** A job that reprovisions the account instead of syncing it. */
+    public static DirectorySyncJob forReprovision(Id contactId) {
+        DirectorySyncJob job = new DirectorySyncJob(contactId, 1);
+        job.reprovision = true;
+        return job;
     }
 
     public void execute(QueueableContext ctx) {
@@ -82,6 +97,10 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         Contact c = rows[0];
 
         Directory_Sync_Setting__mdt settings = injectedSettings != null ? injectedSettings : DirectorySyncConfig.settings();
+        if (reprovision == true) {
+            runReprovision(c, settings);
+            return;
+        }
         Boolean dryRun = settings.Dry_Run__c == true;
         Directory_Status_Mapping__mdt mapping = DirectorySyncConfig.mappingFor(c.Lifecycle_Status__c);
         GoogleDirectoryClient client = new GoogleDirectoryClient(contactId, settings.Domain__c, dryRun);
@@ -222,6 +241,102 @@ public with sharing class DirectorySyncJob implements Queueable, Database.Allows
         if (retryDelay != null) {
             enqueueRetry(retryDelay);
         }
+    }
+
+    /** Reprovision: new temporary password plus a reset email. Callouts first, then email, then DML. */
+    private void runReprovision(Contact c, Directory_Sync_Setting__mdt settings) {
+        Boolean dryRun = settings.Dry_Run__c == true;
+        GoogleDirectoryClient client = new GoogleDirectoryClient(contactId, settings.Domain__c, dryRun);
+        List<String> steps = new List<String>();
+        String reason;
+        String detail;
+        String primaryEmail;
+        String password;
+
+        if (dryRun) {
+            reason = 'dryRun';
+            detail = 'Dry run is on; no password was changed.';
+        } else if (String.isBlank(c.Email)) {
+            reason = 'noPersonalEmail';
+            detail = 'The Contact has no personal email to send the new password to.';
+        } else {
+            DirectoryResult lookup = client.findByExternalId(contactId);
+            Map<String, Object> user = singleUser(lookup);
+            if (!lookup.isSuccess()) {
+                reason = lookup.errorReason != null ? lookup.errorReason : 'http' + lookup.statusCode;
+                detail = 'Google lookup failed.';
+            } else if (GoogleDirectoryClient.userCount(lookup) > 1) {
+                reason = 'multipleMatches';
+                detail = 'More than one Google user carries this Salesforce ID; resolve by hand.';
+            } else if (user == null) {
+                reason = 'noAccount';
+                detail = 'No Google account carries this Contact\'s salesforce_id.';
+            } else if (user.get('suspended') == true) {
+                reason = 'suspendedAccount';
+                detail = 'The account is suspended. Change the Lifecycle Status to reactivate it first.';
+            } else {
+                primaryEmail = (String) user.get('primaryEmail');
+                password = DirectoryJoiner.generatePassword();
+                DirectoryResult reset = client.updateUser(
+                    (String) user.get('id'),
+                    new Map<String, Object>{ 'password' => password, 'changePasswordAtNextLogin' => true },
+                    'Password Reset'
+                );
+                if (reset.isSuccess()) {
+                    steps.add('Done: new temporary password set for ' + primaryEmail + '; change required at next sign-in.');
+                } else {
+                    reason = reset.errorReason != null ? reset.errorReason : 'http' + reset.statusCode;
+                    detail = 'Password change failed' + (String.isBlank(reset.errorMessage) ? '.' : ': ' + reset.errorMessage);
+                    password = null;
+                }
+            }
+        }
+
+        // All callouts are done. The email goes out before any DML.
+        Contact patch = new Contact(Id = contactId, Google_Last_Sync__c = System.now());
+        List<Directory_Sync_Log__c> extraLogs = new List<Directory_Sync_Log__c>();
+        Boolean planAlert = reason != null;
+        if (reason == null) {
+            Messaging.SingleEmailMessage message = WelcomeEmail.buildReset(
+                c.FirstName, primaryEmail, password, c.Email, settings.Org_Wide_Address_Id__c
+            );
+            password = null;
+            String emailError = WelcomeEmail.send(message, forceEmailFailure);
+            Directory_Sync_Log__c welcomeLog = WelcomeEmail.log(contactId, c.Email, primaryEmail, emailError);
+            extraLogs.add(welcomeLog);
+            if (emailError == null) {
+                steps.add('Done: new password emailed to ' + c.Email + '.');
+                patch.Google_Account_Status__c = 'Active';
+                patch.Google_Last_Error__c = null;
+            } else {
+                welcomeLog.Alert_Status__c = 'Pending';
+                reason = 'emailFailed';
+                detail = 'The password was changed, but the email failed: ' + emailError;
+                patch.Google_Account_Status__c = 'Error';
+                patch.Google_Last_Error__c = ('Reprovision email failed; reprovision again. ' + emailError).left(255);
+            }
+        } else {
+            patch.Google_Last_Error__c = ('Reprovision refused (' + reason + '): ' + detail).left(255);
+        }
+
+        List<Directory_Sync_Log__c> logs = new List<Directory_Sync_Log__c>(client.getPendingLogs());
+        logs.add(new Directory_Sync_Log__c(
+            Contact__c = contactId,
+            Operation__c = 'Plan',
+            Success__c = reason == null,
+            Dry_Run__c = dryRun,
+            Error_Reason__c = reason,
+            Alert_Status__c = planAlert ? 'Pending' : null,
+            Request_Summary__c = 'Reprovision for status "' + c.Lifecycle_Status__c + '"',
+            Response_Summary__c = (reason == null ? 'REPROVISION' : 'REPROVISION REFUSED: ' + detail)
+                + (steps.isEmpty() ? '' : '\n- ' + String.join(steps, '\n- '))
+        ));
+        logs.addAll(extraLogs);
+        for (Directory_Sync_Log__c l : logs) {
+            l.Attempt__c = attempt;
+        }
+        update patch;
+        insert logs;
     }
 
     /** Minutes to wait before the next attempt, or null when there is no next attempt. */

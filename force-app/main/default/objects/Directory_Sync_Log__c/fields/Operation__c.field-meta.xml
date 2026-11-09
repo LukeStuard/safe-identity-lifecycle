@@ -75,6 +75,11 @@
                 <default>false</default>
                 <label>Alert</label>
             </value>
+            <value>
+                <fullName>Password Reset</fullName>
+                <default>false</default>
+                <label>Password Reset</label>
+            </value>
         </valueSetDefinition>
     </valueSet>
 </CustomField>
