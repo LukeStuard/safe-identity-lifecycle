@@ -75,6 +75,68 @@ Every path into Google goes through the same platform event and the same integra
 - **Alerts with a budget:** final failures are collected into one digest email per hour, at most 3 a day, because alerts share the org's daily email limit with welcome emails.
 - **Trust writes, reconcile later.** Google's reads can lag its writes, so nothing reads back to verify. The sweep catches drift instead, and its first live run did: a student whose account sat in the wrong OU, repaired through the normal path.
 
+## Evidence
+
+Screenshots from the live tenant and org, redacted for public view (Google user IDs, the signing key ID, personal email addresses, and org links removed).
+
+**Free tier and least privilege**
+
+![Cloud Identity Free subscription, active, no charges](docs/evidence/01-subscription-free.png)
+*The Google side runs on Cloud Identity Free: 50 licenses, no charges.*
+
+![Custom admin role: Users privileges, no Delete](docs/evidence/02a-role-users-privileges.png)
+*The integration's custom role: 11 privileges in total. Users can be created, read, and updated, never deleted. Checking Update forces its six children, the trade-off explained in the brief.*
+
+![Custom admin role: Groups privileges, Read and Update only](docs/evidence/02b-role-groups-privileges.png)
+*Groups: read and update membership only. The integration cannot create or delete groups.*
+
+![Domain-wide delegation: no API clients](docs/evidence/02c-no-domain-wide-delegation.png)
+*No client has domain-wide delegation, so nothing can impersonate a user. The service account acts only through its own role.*
+
+![External Credential JWT claims](docs/evidence/03-external-credential-jwt.png)
+*Salesforce signs a fresh JWT for every callout (120-second expiry) with a key that cannot be exported. Key ID redacted.*
+
+**Structure and placement**
+
+![Organizational units: Demo Students with Admitted, Alumni, Enrolled, Inactive](docs/evidence/04a-ou-structure.png)
+*The OU tree is created by hand. The integration only places users into it.*
+
+![Users in the Enrolled OU](docs/evidence/04b-users-in-enrolled.png)
+*Both demo students in Enrolled, matching their status in Salesforce, under their renamed usernames.*
+
+**State and audit trail on the record**
+
+![Contact with Google sync fields](docs/evidence/05a-contact-sync-fields.png)
+*Sync state lives on the student record: status, Google username, last sync, last error.*
+
+![Directory Sync Logs on the Contact](docs/evidence/05b-contact-sync-logs.png)
+*Every call is logged on the record. Top to bottom (newest first): a staff-requested rename, then the automatic display-name update after the name fields were corrected, then earlier lifecycle runs.*
+
+**Reconciliation finding real drift**
+
+![Sweep evidence: drift, repair, quiet run](docs/evidence/06a-sweep-evidence.png)
+*The first live sweep found a student whose account sat in the wrong OU (SL-000058). The second run republished a sync request, the job moved the account (SL-000063 to SL-000066), and the third sweep came back clean.*
+
+![Sweep drift detail](docs/evidence/06b-sweep-drift-detail.png)
+*What the sweep saw: status Enrolled in Salesforce, account still in Admitted in Google.*
+
+![Sweep complete detail](docs/evidence/06c-sweep-complete-detail.png)
+*The follow-up sweep: 3 users, nothing to repair, nothing to report.*
+
+**Alerts and staff actions**
+
+![Alert digest email](docs/evidence/07-alert-digest.png)
+*A final failure (a student with no personal email for the welcome message) reaches the hourly digest. Link redacted.*
+
+![Rename preview](docs/evidence/08a-rename-preview.png)
+*The Rename action previews the new username and spells out the consequences before anything changes.*
+
+![Rename not available](docs/evidence/08b-rename-not-available.png)
+*When the username already matches the name, the action stops without sending anything.*
+
+![New username notice](docs/evidence/08c-rename-notice.png)
+*The student's notice after a rename: both usernames, no password.*
+
 ## What it doesn't do
 
 - **No account deletion.** Suspension is the end state, consistent with a retention-first policy.
