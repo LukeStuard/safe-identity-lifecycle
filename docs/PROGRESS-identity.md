@@ -270,3 +270,8 @@
 
 - 16 redacted screenshots in docs/evidence/, captioned in the README Evidence section.
 - Found while capturing evidence: luke@ still held Organization Policy Administrator at the org, though the brief recorded it as removed after the key-upload exception. Removed it; luke@ now holds Organization Administrator only. (Removing access in the console strips every role on the principal, so Organization Administrator had to be re-granted; the basic Admin role, formerly Owner, was briefly assigned by mistake and replaced.) Sweep re-run afterward to confirm the Google callouts still authenticate.
+## 2026-11-12: Phase 6 complete
+
+- README with architecture, security and reliability design, captioned evidence, and "What it doesn't do"; 16 redacted screenshots in docs/evidence/.
+- Repo made public after removing employer names from the docs and confirming every commit uses the noreply address.
+- LinkedIn post published as the third in a series after Safe Agent Gateway and Safe Document Intake.
